@@ -38,12 +38,12 @@ def plot_scene(x0, v, p0, n, c):
     t = plane_intersection(x0, v, p0, n)
     close_idx, t_close = find_closest_intersections(t.copy())
 
-    for tt,ii in zip(t_close, close_idx):
-        print(tt, ii)
+    #for tt,ii in zip(t_close, close_idx):
+    #    print(tt, ii)
 
     # Get ray colors
     ray_color = render_rays(x0, v, p0, n, c)
-    print('ray_color:\n', ray_color)
+    #print('ray_color:\n', ray_color)
 
     # Figure
     fig,ax = plt.subplots(
@@ -170,10 +170,8 @@ def gnomonic_projection(fov, shape, flatten=False, dtype='f8'):
         axis=0
     )
     screen_coords /= np.linalg.norm(screen_coords, axis=0)[None]
-    print(screen_coords.shape)
     screen_coords = np.moveaxis(screen_coords, 0, -1)
     if flatten:
-        print(screen_coords.shape)
         screen_coords.shape = (-1, screen_coords.shape[-1])
     return screen_coords
 
@@ -204,8 +202,9 @@ def main():
     x0, v, p0, n, c = gen_rand_scene(n_dim, camera_shape, n_planes, rng=rng)
 
     # Plot scene
-    fig = plot_scene(x0, v, p0, n, c)
-    plt.show()
+    if n_dim == 2:
+        fig = plot_scene(x0, v, p0, n, c)
+        plt.show()
 
     # Render scene
     pixel_color = render_rays(x0, v, p0, n, c)
