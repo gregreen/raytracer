@@ -5,6 +5,17 @@ from __future__ import print_function, division
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+
+## Numeric identifiers for different object types
+#PLANE = 0
+#SPHERE = 1
+
+# Standard float datatype
+FLOAT_DTYPE = 'f8'
+# TODO: Make sure all instances of np.zeros, np.empty, np.array, etc. use
+# this datatype. It may also be necessary to call ().astype(FLOAT_DTYPE).
 
 
 def plane_intersection(x0, v, p0, n):
@@ -18,11 +29,65 @@ def plane_intersection(x0, v, p0, n):
         n (np.ndarray): Normal to plane. Shape = (# of planes, # of dims).
 
     Outputs:
-        t (np.ndarray): Intersection dists. Shape = (# of rays, # of planes).
+        t (np.ndarray): Intersection dist. Shape = (# of rays, # of planes).
     """
     num = np.sum((p0[None,:,:]-x0[:,None,:])*n[None,:,:], axis=2)
     denom = np.sum(v[:,None,:]*n[None,:,:], axis=2)
     return num / denom
+
+
+def sphere_intersection(x0, v, p0, r, unroll_multiple_intersections=True):
+    """
+    Computes the intersections of a set of rays with a set of spheres.
+
+    Inputs:
+        x0 (np.ndarray): Coords of ray origin. Shape = (# of rays, # of dims).
+        v (np.ndarray): Direction of ray. Shape = (# of rays, # of dims).
+        p0 (np.ndarray): Sphere center. Shape = (# of spheres, # of dims).
+        r (np.ndarray): Sphere radii. Shape = (# of spheres,).
+
+    Outputs:
+        t (np.ndarray): Intersection dist. Shape = (# rays, # spheres, 2).
+    """
+    v2 = np.sum(v**2, axis=1) # shape = (ray,)
+    # Vector from ray origin to sphere origin
+    rho = p0[None,:,:] - x0[:,None,:] # shape = (ray, sphere, dim)
+    # Distance^2 from ray origin to sphere origin: (p0 - x0)^2
+    rho2 = np.sum(rho*rho, axis=2) # shape = (ray, sphere)
+    # (p0 - x0) * v
+    eta = np.sum(rho*v[:,None,:], axis=2) # shape = (ray, sphere)
+    # Discriminant (in quadratic equation): eta^2 - v^2 * (rho^2 - r^2)
+    delta2 = eta**2 - v2[:,None]*(rho2-(r**2)[None,:]) # shape = (ray, sphere)
+    delta = np.sqrt(delta2)
+    # Two different intersection points (could be the same or imaginary)
+    n_rays = x0.shape[0]
+    n_spheres = p0.shape[0]
+    t = np.empty((n_rays, n_spheres, 2), dtype=FLOAT_DTYPE)
+    t[:,:,0] = (eta + delta) / v2[:,None]
+    t[:,:,1] = (eta - delta) / v2[:,None]
+    # Replace NaNs with infs
+    t[~np.isfinite(t)] = np.inf
+    # Unroll last dimension (the intersection dimension)?
+    if unroll_multiple_intersections:
+        t.shape = (n_rays, 2*n_spheres)
+    return t
+
+
+def sphere_normal(x0, p0):
+    """
+    Computes the normal to a sphere at the point x0 (assumed to be on the
+    sphere, though this is not verified.
+
+    Inputs:
+        x0 (np.ndarray): Coords of ray origin. Shape = (# spheres, # dims).
+        p0 (np.ndarray): Sphere center. Shape = (# spheres, # dims).
+
+    Outputs:
+        n (np.ndarray): Normal vectors. Shape = (# spheres, # dims).
+    """
+    rho = p0 - x0
+    rho /= np.linalg.norm(rho, axis=1)[:,None]
+    return rho
 
 
 def find_closest_intersections(t, eps=1e-10):
@@ -31,15 +96,17 @@ def find_closest_intersections(t, eps=1e-10):
     return idx, t[np.arange(len(idx)),idx]
 
 
-def plot_scene(x0, v, p0, pn, pc, pr):
+def plot_scene(rays, scene, recursion_depth=3):
+    x0 = rays['x0']
+    v = rays['v']
+
     n_dim = x0.shape[1]
 
     # Get ray colors
-    #ray_color = render_rays(x0, v, p0, n, c)
     ray_value, ray_props = render_rays_recursive(
-        3,
+        recursion_depth,
         x0, v,
-        p0, pn, pc, pr,
+        scene,
         collect_rays=True
     )
 
@@ -56,6 +123,10 @@ def plot_scene(x0, v, p0, pn, pc, pr):
     )
 
     # Draw planes
+    p0 = scene['planes']['p0']
+    pn = scene['planes']['n']
+    pc = scene['planes']['color']
+    pr = scene['planes']['reflectivity']
     for pp,nn,cc,rr in zip(p0,pn,pc,pr):
         ax.scatter([pp[0]], [pp[1]], color=cc)
         ax.arrow(
@@ -71,6 +142,20 @@ def plot_scene(x0, v, p0, pn, pc, pr):
             alpha=np.mean(rr),
             lw=3
         )
+
+    # Draw spheres
+    s0 = scene['spheres']['p0']
+    srad = scene['spheres']['r']
+    sc = scene['spheres']['color']
+    srefl = scene['spheres']['reflectivity']
+    for pp,rad,cc,refl in zip(s0,srad,sc,srefl):
+        ax.add_patch(patches.Circle(
+            pp, radius=rad,
+            edgecolor=cc,
+            facecolor='none',
+            alpha=np.mean(refl),
+            lw=3.
+        ))
 
     # Draw intersections
     c_norm = np.max(ray_props['ray_value'])
@@ -118,26 +203,47 @@ def load_scene(fname):
     with open(fname, 'r') as f:
         d = json.load(f)
 
+    n_dim = d['n_dim']
+    n_channels = d['n_channels']
+
     # Planes
-    for key in ('p0', 'pn', 'pc', 'pr'):
-        d['planes'][key] = np.array(d['planes'][key])
+    for key in ('p0', 'n'):
+        d['planes'][key] = np.array(d['planes'][key], dtype=FLOAT_DTYPE)
+        if len(d['planes'][key]) == 0:
+            d['planes'][key].shape = (0,n_dim)
+
+    # Spheres
+    for key in ('p0', 'r'):
+        d['spheres'][key] = np.array(d['spheres'][key], dtype=FLOAT_DTYPE)
+    if len(d['spheres']['p0']) == 0:
+        d['spheres']['p0'].shape = (0,n_dim)
+
+    # Material properties (all object geometries)
+    for geom in ('planes', 'spheres'):
+        for prop in ('color', 'reflectivity'):
+            d[geom][prop] = np.array(d[geom][prop], dtype=FLOAT_DTYPE)
+            if len(d[geom][prop]) == 0:
+                d[geom][prop].shape = (0,n_channels)
 
     # Camera
-    d['camera']['shape'] = tuple(d['camera']['shape'])
-    d['camera']['v'] = gnomonic_projection(
-        d['camera']['fov'],
-        d['camera']['shape'],
+    camera = d.pop('camera')
+    camera['shape'] = tuple(camera['shape'])
+    camera['v'] = gnomonic_projection(
+        camera['fov'],
+        camera['shape'],
         flatten=True
     )
-    d['camera']['x0'] = np.tile(
-        d['camera']['x0'],
-        (d['camera']['v'].shape[0], 1)
+    camera['x0'] = np.tile(
+        camera['x0'],
+        (camera['v'].shape[0], 1)
     )
 
-    return d
+    return camera, d
 
 
-def gen_rand_scene(n_dim, camera_shape, n_planes, fov=75., rng=None):
+def gen_rand_scene(n_dim, camera_shape,
+                   n_planes, n_spheres,
+                   fov=75., rng=None):
     if rng is None:
         rng = np.random.default_rng()
 
@@ -169,18 +275,40 @@ def gen_rand_scene(n_dim, camera_shape, n_planes, fov=75., rng=None):
     idx = idx[:n_planes//2]
     pc[idx] *= 0.1
 
-    #scene = {
-    #    'planes': {
-    #        'p0': p0,
-    #        'n': n,
-    #        'c': c
-    #    }
-    #    # Later, spheres, trianges, etc.
-    #}
-    #return scene
+    # Spheres
+    s0 = 4 * rng.normal(size=(n_spheres, n_dim))
+    r = rng.uniform(0.5, 2., size=n_spheres)
 
+    # Sphere colors
+    sc = rng.uniform(size=(n_spheres, 3))
+
+    # Sphere reflectivity
+    sr = rng.uniform(0., 0.5, size=(n_spheres, 3))
+
+    rays = {
+        'x0': x0.astype(FLOAT_DTYPE),
+        'v': v.astype(FLOAT_DTYPE)
+    }
+    scene = {
+        'n_dim': n_dim,
+        'n_channels': 3,
+        'planes': {
+            'p0': p0.astype(FLOAT_DTYPE),
+            'n': pn.astype(FLOAT_DTYPE),
+            'color': sc.astype(FLOAT_DTYPE),
+            'reflectivity': sr.astype(FLOAT_DTYPE)
+            # Later, diffusivity, specularity, transmission, ind. of refr.
+        },
+        'spheres': {
+            'p0': s0.astype(FLOAT_DTYPE),
+            'r': r.astype(FLOAT_DTYPE),
+            'color': sc.astype(FLOAT_DTYPE),
+            'reflectivity': sr.astype(FLOAT_DTYPE)
+        }
+        # Later, trianges, etc.
+    }
+    return rays, scene
     # TODO: Generate camera and scene separately
-    return x0, v, p0, pn, pc, pr
 
 
 def mirror_reflection_outgoing(vi, n):
@@ -202,7 +330,7 @@ def mirror_reflection_outgoing(vi, n):
 def render_rays_recursive(
                           recursion_limit,
                           x0, v, # Ray properties
-                          p0, pn, pc, pr, # Plane properties
+                          scene, # Properties of objects in scene
                           collect_rays=False,
                           #ray_parent_id=None,
                           #ray_contribution=None,
@@ -251,28 +379,65 @@ def render_rays_recursive(
         value_all_rays (np.ndarray): Value of each ray, at all recursion
             depths. Only returned if `collect_rays` is `True`.
     """
-    n_rays = x0.shape[0]
-    n_channels = pc.shape[1]
+    n_rays, n_dim = x0.shape
+    n_channels = scene['n_channels']
 
-    ray_value = np.zeros((n_rays, n_channels), dtype=pc.dtype)
+    ray_value = np.zeros((n_rays, n_channels), dtype=FLOAT_DTYPE)
 
-    # If ray parent ID and contribution undefined (typically at top
-    # level of recursion), set them to default values.
-    #if ray_parent_id is None:
-    #    ray_parent_id = np.arange(n_rays, dtype='i8')
-    #if ray_contribution is None:
-    #    ray_contribution = np.ones(n_rays)
+    # Empty array for all intersections
+    n_planes = len(scene['planes']['p0'])
+    n_spheres = len(scene['spheres']['p0'])
+    t = np.empty((n_rays,n_planes+2*n_spheres), dtype=FLOAT_DTYPE)
+
+    # Plane intersections. Shape = (# of rays, # of planes)
+    t[:,:n_planes] = plane_intersection(
+        x0, v,
+        scene['planes']['p0'],
+        scene['planes']['n']
+    )
+
+    # Sphere intersections. Shape = (# of rays, # of spheres)
+    t[:,n_planes:] = sphere_intersection(
+        x0, v,
+        scene['spheres']['p0'],
+        scene['spheres']['r'],
+        unroll_multiple_intersections=True
+    )
 
     # For each ray, calculate closest intersections
-    t = plane_intersection(x0, v, p0, pn) # shape = (# of rays, # of planes)
     close_idx, t_close = find_closest_intersections(t)
+    print('close_idx', close_idx)
+    print('t_close', t_close)
 
     # Identify rays with an intersection (i.e., t not infinite)
-    ray_idx = np.isfinite(t_close)
-    plane_idx = close_idx[ray_idx]
+    ray_idx = np.where(np.isfinite(t_close))[0]
+    obj_idx = close_idx[ray_idx]
+    #plane_idx = close_idx[ray_idx]
+    print('ray_idx', ray_idx)
+    print(f'ray_idx.shape = {ray_idx.shape}')
+    print(f'obj_idx.shape = {obj_idx.shape}')
+
+    # Determine what type of object each ray intersects, and determine
+    # the index (ID) of that object in its respective object array.
+    idx_is_plane = obj_idx < n_planes
+    idx_is_sphere = ~idx_is_plane
+    print('idx_is_plane', idx_is_plane)
+    print('idx_is_sphere', idx_is_sphere)
+
+    plane_id = obj_idx[idx_is_plane]
+    sphere_id = (obj_idx[idx_is_sphere] - n_planes) // 2
+    print('plane_id', plane_id)
+    print('sphere_id', sphere_id)
+    #plane_id = np.where(idx_is_plane)[0]
+    #sphere_id = (np.where(idx_is_sphere)[2] - n_planes) // 2
 
     # Add luminosity from sources that are directly hit
-    ray_value[ray_idx] = pc[plane_idx]
+    ray_idx_plane = ray_idx[idx_is_plane]
+    ray_idx_sphere = ray_idx[idx_is_sphere]
+    #print('ray_idx_plane', ray_idx_plane)
+    #print('ray_idx_sphere', ray_idx_sphere)
+    ray_value[ray_idx_plane] = scene['planes']['color'][plane_id]
+    ray_value[ray_idx_sphere] = scene['spheres']['color'][sphere_id]
 
     if (recursion_depth >= recursion_limit) or (len(t_close) == 0):
         if collect_rays:
@@ -290,11 +455,33 @@ def render_rays_recursive(
     child_contrib = []
     child_parent_idx = []
 
+    # Calculate intersection coordinates
+    x_i = x0[ray_idx] + v[ray_idx] * t_close[ray_idx][:,None]
+
+    # Determine intersection normals
+    n_intersects = ray_idx.shape[0]
+    n = np.empty(shape=(n_intersects,n_dim), dtype=FLOAT_DTYPE)
+
+    # Empty reflectivity array
+    reflect = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
+
+    # Plane normals, reflectivity, etc.
+    n[idx_is_plane] = scene['planes']['n'][plane_id]
+    reflect[idx_is_plane] = scene['planes']['reflectivity'][plane_id]
+
+    # Sphere normals, reflectivity, etc.
+    n[idx_is_sphere] = sphere_normal(
+        x_i[idx_is_sphere],
+        scene['spheres']['p0'][sphere_id]
+    )
+    reflect[idx_is_sphere] = scene['planes']['reflectivity'][sphere_id]
+
     # Spawn mirror reflection at each intersection
-    x0_child.append(x0[ray_idx] + v[ray_idx] * t_close[ray_idx][:,None])
-    v_child.append(mirror_reflection_outgoing(v[ray_idx], pn[plane_idx]))
-    child_contrib.append(pr[plane_idx])
-    child_parent_idx.append(np.where(ray_idx)[0])
+    x0_child.append(x_i)
+    v_child.append(mirror_reflection_outgoing(v[ray_idx], n))
+    child_contrib.append(reflect)
+    child_parent_idx.append(ray_idx)
+    #child_parent_idx.append(np.where(ray_idx)[0])
 
     # Combine all types of child rays into one array
     x0_child = np.concatenate(x0_child, axis=0)
@@ -311,7 +498,7 @@ def render_rays_recursive(
     ret = render_rays_recursive(
         recursion_limit,
         x0_child, v_child,
-        p0, pn, pc, pr,
+        scene,
         collect_rays=collect_rays,
         recursion_depth=recursion_depth+1
     )
@@ -320,6 +507,10 @@ def render_rays_recursive(
     else:
         ray_value_ret = ret
 
+    print(f'ray_value.shape = {ray_value.shape}')
+    print(f'child_parent_idx.shape = {child_parent_idx.shape}')
+    print(f'child_contrib.shape = {child_contrib.shape}')
+    print(f'ray_value_ret.shape = {ray_value_ret.shape}')
     np.add.at(ray_value, child_parent_idx, child_contrib*ray_value_ret)
 
     if collect_rays:
@@ -349,20 +540,20 @@ def render_rays(x0, v, p0, n, c):
     # Color each ray by surface it hits
     n_rays = x0.shape[0]
     n_channels = c.shape[1]
-    ray_value = np.zeros((n_rays, n_channels), dtype=c.dtype)
+    ray_value = np.zeros((n_rays, n_channels), dtype=FLOAT_DTYPE)
     ray_value[ray_idx] = c[plane_idx]
 
     return ray_value
 
 
-def gnomonic_projection(fov, shape, flatten=False, dtype='f8'):
+def gnomonic_projection(fov, shape, flatten=False):
     r = 0.5 * shape[0] / np.tan(np.radians(fov))
-    screen_coords = np.indices(shape).astype(dtype)
+    screen_coords = np.indices(shape).astype(FLOAT_DTYPE)
     #screen_coords = np.flip(screen_coords, axis=0)
     for i,s in enumerate(shape):
         screen_coords[i] -= 0.5 * (s-1)
     screen_coords = np.concatenate(
-        [screen_coords,np.full((1,)+shape,r,dtype=dtype)],
+        [screen_coords,np.full((1,)+shape,r,dtype=FLOAT_DTYPE)],
         axis=0
     )
     screen_coords /= np.linalg.norm(screen_coords, axis=0)[None]
@@ -394,21 +585,25 @@ def main():
     #n_dim = 2
     #camera_shape = (20,)
     #n_planes = 4
-    #x0,v,p0,pn,pc,pr = gen_rand_scene(n_dim, camera_shape, n_planes, rng=rng)
+    #n_spheres = 3
+    ##x0,v,p0,pn,pc,pr = gen_rand_scene(n_dim, camera_shape, n_planes, rng=rng)
+    #camera, scene = gen_rand_scene(
+    #    n_dim, camera_shape,
+    #    n_planes, n_spheres,
+    #    rng=rng
+    #)
+    #print(scene)
 
-    scene_data = load_scene('box.json')
-    n_dim = scene_data['n_dim']
-    camera_shape = scene_data['camera']['shape']
-    x0 = scene_data['camera']['x0']
-    v = scene_data['camera']['v']
-    p0 = scene_data['planes']['p0']
-    pn = scene_data['planes']['pn']
-    pc = scene_data['planes']['pc']
-    pr = scene_data['planes']['pr']
+    camera, scene = load_scene('box_with_light.json')
+    n_dim = scene['n_dim']
+    camera_shape = camera['shape']
+    x0 = camera['x0']
+    v = camera['v']
+    print(scene)
 
     # Plot scene
     if n_dim == 2:
-        fig = plot_scene(x0, v, p0, pn, pc, pr)
+        fig = plot_scene(camera, scene, recursion_depth=3)
         fig.savefig('ray_diagram_2d.svg')
         #plt.show()
 
@@ -416,15 +611,15 @@ def main():
     from tqdm import tqdm
     n_frames = 360
 
-    for max_depth in range(5):
+    for max_depth in range(4,5):
         print(f'Rendering scene at max depth {max_depth} ...')
-        v_rot = v.copy()
+        v_rot = camera['v'].copy()
 
         for frame in tqdm(range(n_frames)):
             pixel_color = render_rays_recursive(
                 max_depth,
-                x0, v_rot,
-                p0, pn, pc, pr,
+                camera['x0'], v_rot,
+                scene,
                 collect_rays=False
             )
             pixel_color /= np.max(pixel_color)
