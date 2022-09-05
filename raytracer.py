@@ -7,13 +7,15 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+import os
+
 
 ## Numeric identifiers for different object types
 #PLANE = 0
 #SPHERE = 1
 
 # Standard float datatype
-FLOAT_DTYPE = 'f8'
+FLOAT_DTYPE = 'f4'
 # TODO: Make sure all instances of np.zeros, np.empty, np.array, etc. use
 # this datatype. It may also be necessary to call ().astype(FLOAT_DTYPE).
 
@@ -76,7 +78,7 @@ def sphere_intersection(x0, v, p0, r, unroll_multiple_intersections=True):
 def sphere_normal(x0, p0):
     """
     Computes the normal to a sphere at the point x0 (assumed to be on the
-    sphere, though this is not verified.
+    sphere, though this is not verified inside the routine.
 
     Inputs:
         x0 (np.ndarray): Coords of ray origin. Shape = (# spheres, # dims).
@@ -85,18 +87,18 @@ def sphere_normal(x0, p0):
     Outputs:
         n (np.ndarray): Normal vectors. Shape = (# spheres, # dims).
     """
-    rho = p0 - x0
+    rho = x0 - p0
     rho /= np.linalg.norm(rho, axis=1)[:,None]
     return rho
 
 
-def find_closest_intersections(t, eps=1e-10):
+def find_closest_intersections(t, eps=1e-5 if FLOAT_DTYPE=='f4' else 1e-8):
     t[t<eps] = np.inf
     idx = np.argmin(t, axis=1)
     return idx, t[np.arange(len(idx)),idx]
 
 
-def plot_scene(rays, scene, recursion_depth=3):
+def plot_scene(rays, scene, recursion_depth=3, rng=None):
     x0 = rays['x0']
     v = rays['v']
 
@@ -107,7 +109,8 @@ def plot_scene(rays, scene, recursion_depth=3):
         recursion_depth,
         x0, v,
         scene,
-        collect_rays=True
+        collect_rays=True,
+        rng=rng
     )
 
     for key in ray_props:
@@ -126,7 +129,11 @@ def plot_scene(rays, scene, recursion_depth=3):
     p0 = scene['planes']['p0']
     pn = scene['planes']['n']
     pc = scene['planes']['color']
-    pr = scene['planes']['reflectivity']
+    pr = (
+        scene['planes']['reflectivity']
+      + scene['planes']['diffusivity']
+    ) + 0.1
+    pr /= np.max(pr,axis=1)[:,None] + 1.e-8
     for pp,nn,cc,rr in zip(p0,pn,pc,pr):
         ax.scatter([pp[0]], [pp[1]], color=cc)
         ax.arrow(
@@ -136,8 +143,8 @@ def plot_scene(rays, scene, recursion_depth=3):
             head_width=0.2
         )
         ax.plot(
-            [pp[0]-30*nn[1], pp[0]+30*nn[1]],
-            [pp[1]+30*nn[0], pp[1]-30*nn[0]],
+            [pp[0]-99*nn[1], pp[0]+99*nn[1]],
+            [pp[1]+99*nn[0], pp[1]-99*nn[0]],
             color=cc,
             alpha=np.mean(rr),
             lw=3
@@ -146,8 +153,13 @@ def plot_scene(rays, scene, recursion_depth=3):
     # Draw spheres
     s0 = scene['spheres']['p0']
     srad = scene['spheres']['r']
-    sc = scene['spheres']['color']
-    srefl = scene['spheres']['reflectivity']
+    sc = scene['spheres']['color']# + scene['spheres']['diffusivity']
+    #sc /= np.max(sc, axis=1)[:,None] + 1.e-8
+    srefl = (
+        scene['spheres']['reflectivity']
+      + scene['spheres']['diffusivity']
+    ) + 0.1
+    srefl /= np.max(srefl,axis=1)[:,None] + 1.e-8
     for pp,rad,cc,refl in zip(s0,srad,sc,srefl):
         ax.add_patch(patches.Circle(
             pp, radius=rad,
@@ -158,24 +170,34 @@ def plot_scene(rays, scene, recursion_depth=3):
         ))
 
     # Draw intersections
-    c_norm = np.max(ray_props['ray_value'])
+    c_norm = np.max(ray_props['ray_value']) + 1.e-8
     idx = np.isfinite(ray_props['t'])
     xp = (
         ray_props['x0'][idx,:]
       + ray_props['v'][idx,:]*ray_props['t'][idx,None]
     )
-    for xx,xo,vv,cc in zip(xp, ray_props['x0'][idx],
-                           ray_props['v'][idx],
-                           ray_props['ray_value'][idx]
-                          ):
+    for xx,xo,vv,cc,nn in zip(xp, ray_props['x0'][idx],
+                              ray_props['v'][idx],
+                              ray_props['ray_value'][idx],
+                              ray_props['n']#[idx]
+                             ):
         ax.scatter([xx[0]], [xx[1]], color=cc/c_norm)
         ax.plot([xo[0],xx[0]],[xo[1],xx[1]], color=cc/c_norm, alpha=0.8)
+        if np.sum(nn**2) > 1.e-5:
+            ax.arrow(
+                xx[0], xx[1],
+                0.25*nn[0], 0.25*nn[1],
+                color='orange',
+                head_width=0.05,
+                #zorder=10000,
+                alpha=0.5
+            )
 
     # Draw rays that go to infinity
     for xo,vv in zip(ray_props['x0'][~idx], ray_props['v'][~idx]):
         ax.plot(
-            [xo[0], xo[0]+30*vv[0]],
-            [xo[1], xo[1]+30*vv[1]],
+            [xo[0], xo[0]+99*vv[0]],
+            [xo[1], xo[1]+99*vv[1]],
             color='k',
             alpha=0.05
         )
@@ -192,10 +214,18 @@ def plot_scene(rays, scene, recursion_depth=3):
             alpha=0.5
         )
 
-    ax.set_xlim(-10, 10)
-    ax.set_ylim(-10, 10)
+    # Find most distant object in scene
+    x_max = 1.5 * max([
+        np.max(np.abs(scene['planes']['p0'])),
+        np.max(np.abs(scene['spheres']['p0'])+scene['spheres']['r']),
+    ])
+    xlim = [-x_max, x_max]
+    ax.set_xlim(xlim)
+    ax.set_ylim(xlim)
+    #ax.set_xlim(-10, 10)
+    #ax.set_ylim(-10, 10)
 
-    return fig
+    return fig, ax
 
 
 def load_scene(fname):
@@ -220,7 +250,7 @@ def load_scene(fname):
 
     # Material properties (all object geometries)
     for geom in ('planes', 'spheres'):
-        for prop in ('color', 'reflectivity'):
+        for prop in ('color', 'reflectivity', 'diffusivity'):
             d[geom][prop] = np.array(d[geom][prop], dtype=FLOAT_DTYPE)
             if len(d[geom][prop]) == 0:
                 d[geom][prop].shape = (0,n_channels)
@@ -228,15 +258,6 @@ def load_scene(fname):
     # Camera
     camera = d.pop('camera')
     camera['shape'] = tuple(camera['shape'])
-    camera['v'] = gnomonic_projection(
-        camera['fov'],
-        camera['shape'],
-        flatten=True
-    )
-    camera['x0'] = np.tile(
-        camera['x0'],
-        (camera['v'].shape[0], 1)
-    )
 
     return camera, d
 
@@ -269,6 +290,9 @@ def gen_rand_scene(n_dim, camera_shape,
     # Plane reflectivity
     pr = rng.uniform(0., 0.5, size=(n_planes, 3))
 
+    # Plane diffusivity
+    pd = rng.uniform(0.2, 0.7, size=(n_planes, 3))
+
     # Choose some planes to have no color of their own:
     idx = np.arange(n_planes)
     rng.shuffle(idx)
@@ -285,6 +309,9 @@ def gen_rand_scene(n_dim, camera_shape,
     # Sphere reflectivity
     sr = rng.uniform(0., 0.5, size=(n_spheres, 3))
 
+    # Sphere diffusivity
+    sd = rng.uniform(0.2, 0.7, size=(n_spheres, 3))
+
     rays = {
         'x0': x0.astype(FLOAT_DTYPE),
         'v': v.astype(FLOAT_DTYPE)
@@ -295,15 +322,17 @@ def gen_rand_scene(n_dim, camera_shape,
         'planes': {
             'p0': p0.astype(FLOAT_DTYPE),
             'n': pn.astype(FLOAT_DTYPE),
-            'color': sc.astype(FLOAT_DTYPE),
-            'reflectivity': sr.astype(FLOAT_DTYPE)
-            # Later, diffusivity, specularity, transmission, ind. of refr.
+            'color': pc.astype(FLOAT_DTYPE),
+            'reflectivity': pr.astype(FLOAT_DTYPE),
+            'diffusivity': pd.astype(FLOAT_DTYPE)
+            # Later, specularity, transmission, ind. of refr.
         },
         'spheres': {
             'p0': s0.astype(FLOAT_DTYPE),
             'r': r.astype(FLOAT_DTYPE),
             'color': sc.astype(FLOAT_DTYPE),
-            'reflectivity': sr.astype(FLOAT_DTYPE)
+            'reflectivity': sr.astype(FLOAT_DTYPE),
+            'diffusivity': sd.astype(FLOAT_DTYPE)
         }
         # Later, trianges, etc.
     }
@@ -327,6 +356,52 @@ def mirror_reflection_outgoing(vi, n):
     """
     return vi - 2 * n * np.sum(vi*n, axis=1)[:,None]
 
+
+def draw_from_n_sphere_surface(n_vecs, n_dim, rng):
+    """
+    Draws a random vector from the surface of an n-sphere.
+
+    Inputs:
+        n_vecs (int): # of vectors to draw.
+        n_dim (int): Dimensionality of space sphere is embedded in.
+        rng (np.random.Generator): Numpy pseudorandom bit genenerator.
+
+    Outputs:
+        x (np.ndarray): Vector drawn uniformly from the surface of the
+            sphere. Shape = (n_vecs, n_dim).
+    """
+    x = rng.normal(size=(n_vecs, n_dim))
+    x /= np.linalg.norm(x, axis=1)[:,None]
+    return x
+
+
+def diffuse_reflection_outgoing(vi, n, rng):
+    """
+    Generates the direction of an outgoing ray generated by a diffuse
+    reflection.
+
+    Inputs:
+        vi (np.ndarray): Direction of incoming ray.
+            Shape = (# of rays, # of dims).
+        n (np.ndarray): Normal to surface. Shape = (# of rays, # of dims).
+
+    Outputs:
+        vo (np.ndarray): Direction of outgoing ray.
+                         Shape = (# of rays, # of dims).
+        cos_phi (np.ndarray): Cosine of angle between incoming ray and
+            normal. Used in Lambert's Cosine Law. Shape = (# of rays,).
+    """
+    n_vecs, n_dim = vi.shape
+    vo = draw_from_n_sphere_surface(n_vecs, n_dim, rng)
+    vo_dot_n = np.sum(vo*n, axis=1)
+    idx_reflect = (np.sign(np.sum(vi*n,axis=1)) == np.sign(vo_dot_n))
+    vo[idx_reflect] *= -1
+    #vo[idx_reflect] -= 2 * n[idx_reflect] * vo_dot_n[idx_reflect,None]
+    vi_norm = np.linalg.norm(vi, axis=1)
+    cos_phi = np.abs(vo_dot_n / vi_norm)
+    return vo, cos_phi
+
+
 def render_rays_recursive(
                           recursion_limit,
                           x0, v, # Ray properties
@@ -334,7 +409,9 @@ def render_rays_recursive(
                           collect_rays=False,
                           #ray_parent_id=None,
                           #ray_contribution=None,
-                          recursion_depth=0
+                          n_diffuse=4,
+                          recursion_depth=0,
+                          rng=None
                          ):
     """
     Computes the value of each ray, recursively spawning child rays
@@ -379,6 +456,9 @@ def render_rays_recursive(
         value_all_rays (np.ndarray): Value of each ray, at all recursion
             depths. Only returned if `collect_rays` is `True`.
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     n_rays, n_dim = x0.shape
     n_channels = scene['n_channels']
 
@@ -406,28 +486,28 @@ def render_rays_recursive(
 
     # For each ray, calculate closest intersections
     close_idx, t_close = find_closest_intersections(t)
-    print('close_idx', close_idx)
-    print('t_close', t_close)
+    #print('close_idx', close_idx)
+    #print('t_close', t_close)
 
     # Identify rays with an intersection (i.e., t not infinite)
     ray_idx = np.where(np.isfinite(t_close))[0]
     obj_idx = close_idx[ray_idx]
     #plane_idx = close_idx[ray_idx]
-    print('ray_idx', ray_idx)
-    print(f'ray_idx.shape = {ray_idx.shape}')
-    print(f'obj_idx.shape = {obj_idx.shape}')
+    #print('ray_idx', ray_idx)
+    #print(f'ray_idx.shape = {ray_idx.shape}')
+    #print(f'obj_idx.shape = {obj_idx.shape}')
 
     # Determine what type of object each ray intersects, and determine
     # the index (ID) of that object in its respective object array.
     idx_is_plane = obj_idx < n_planes
     idx_is_sphere = ~idx_is_plane
-    print('idx_is_plane', idx_is_plane)
-    print('idx_is_sphere', idx_is_sphere)
+    #print('idx_is_plane', idx_is_plane)
+    #print('idx_is_sphere', idx_is_sphere)
 
     plane_id = obj_idx[idx_is_plane]
     sphere_id = (obj_idx[idx_is_sphere] - n_planes) // 2
-    print('plane_id', plane_id)
-    print('sphere_id', sphere_id)
+    #print('plane_id', plane_id)
+    #print('sphere_id', sphere_id)
     #plane_id = np.where(idx_is_plane)[0]
     #sphere_id = (np.where(idx_is_sphere)[2] - n_planes) // 2
 
@@ -445,6 +525,7 @@ def render_rays_recursive(
                 'x0': [x0],
                 'v': [v],
                 't': [t_close],
+                'n': [np.zeros_like(v)],
                 'ray_value': [ray_value]
             }
             return ray_value, ray_props
@@ -455,39 +536,66 @@ def render_rays_recursive(
     child_contrib = []
     child_parent_idx = []
 
-    # Calculate intersection coordinates
-    x_i = x0[ray_idx] + v[ray_idx] * t_close[ray_idx][:,None]
+    # Calculate intersection coordinates and incoming direction
+    v_i = v[ray_idx]
+    x_i = x0[ray_idx] + v_i * t_close[ray_idx][:,None]
 
     # Determine intersection normals
     n_intersects = ray_idx.shape[0]
     n = np.empty(shape=(n_intersects,n_dim), dtype=FLOAT_DTYPE)
 
-    # Empty reflectivity array
+    # Empty reflectivity and diffusivity arrays
     reflect = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
+    diffuse = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
 
-    # Plane normals, reflectivity, etc.
+    # Plane normals, reflectivity, diffusivity, etc.
     n[idx_is_plane] = scene['planes']['n'][plane_id]
     reflect[idx_is_plane] = scene['planes']['reflectivity'][plane_id]
+    diffuse[idx_is_plane] = scene['planes']['diffusivity'][plane_id]
 
-    # Sphere normals, reflectivity, etc.
+    # Sphere normals, reflectivity, diffusivity, etc.
     n[idx_is_sphere] = sphere_normal(
         x_i[idx_is_sphere],
         scene['spheres']['p0'][sphere_id]
     )
-    reflect[idx_is_sphere] = scene['planes']['reflectivity'][sphere_id]
+    #print(x_i[idx_is_sphere]),
+    #print(scene['spheres']['p0'][sphere_id])
+    #print(n[idx_is_sphere])
+    #print('')
+    #print(np.mean(n[idx_is_sphere][sphere_id==1], axis=0))
+    reflect[idx_is_sphere] = scene['spheres']['reflectivity'][sphere_id]
+    diffuse[idx_is_sphere] = scene['spheres']['diffusivity'][sphere_id]
 
     # Spawn mirror reflection at each intersection
     x0_child.append(x_i)
-    v_child.append(mirror_reflection_outgoing(v[ray_idx], n))
+    v_child.append(mirror_reflection_outgoing(v_i, n))
     child_contrib.append(reflect)
     child_parent_idx.append(ray_idx)
-    #child_parent_idx.append(np.where(ray_idx)[0])
+
+    # Spawn diffuse reflection at each intersection
+    for k in range(n_diffuse):
+        x0_child.append(x_i)
+        vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
+        v_child.append(vo)
+        child_contrib.append(diffuse*cos_phi[:,None]/n_diffuse)
+        child_parent_idx.append(ray_idx)
 
     # Combine all types of child rays into one array
     x0_child = np.concatenate(x0_child, axis=0)
     v_child = np.concatenate(v_child, axis=0)
     child_contrib = np.concatenate(child_contrib, axis=0)
     child_parent_idx = np.concatenate(child_parent_idx, axis=0)
+
+    # Filter out rays with zero contribution
+    idx_contrib = np.any(child_contrib>1e-7, axis=1)
+    #print(
+    #    f'{np.count_nonzero(idx_contrib)} of {idx_contrib.size} '
+    #    'rays contribute.'
+    #)
+    x0_child = x0_child[idx_contrib]
+    v_child = v_child[idx_contrib]
+    child_contrib = child_contrib[idx_contrib]
+    child_parent_idx = child_parent_idx[idx_contrib]
 
     #print(f'recursion depth: {recursion_depth}')
     #print('x0:\n', x0_child)
@@ -499,18 +607,20 @@ def render_rays_recursive(
         recursion_limit,
         x0_child, v_child,
         scene,
+        n_diffuse=n_diffuse,
         collect_rays=collect_rays,
-        recursion_depth=recursion_depth+1
+        recursion_depth=recursion_depth+1,
+        rng=rng
     )
     if collect_rays:
         ray_value_ret, ray_props_ret = ret
     else:
         ray_value_ret = ret
 
-    print(f'ray_value.shape = {ray_value.shape}')
-    print(f'child_parent_idx.shape = {child_parent_idx.shape}')
-    print(f'child_contrib.shape = {child_contrib.shape}')
-    print(f'ray_value_ret.shape = {ray_value_ret.shape}')
+    #print(f'ray_value.shape = {ray_value.shape}')
+    #print(f'child_parent_idx.shape = {child_parent_idx.shape}')
+    #print(f'child_contrib.shape = {child_contrib.shape}')
+    #print(f'ray_value_ret.shape = {ray_value_ret.shape}')
     np.add.at(ray_value, child_parent_idx, child_contrib*ray_value_ret)
 
     if collect_rays:
@@ -518,6 +628,7 @@ def render_rays_recursive(
             'x0': [x0],
             'v': [v],
             't': [t_close],
+            'n': [n],
             'ray_value': [ray_value]
         }
         for key in ray_props_ret:
@@ -546,20 +657,32 @@ def render_rays(x0, v, p0, n, c):
     return ray_value
 
 
-def gnomonic_projection(fov, shape, flatten=False):
+def gnomonic_projection(fov, shape,
+                        flatten=False,
+                        antialias=False,
+                        rng=None):
     r = 0.5 * shape[0] / np.tan(np.radians(fov))
     screen_coords = np.indices(shape).astype(FLOAT_DTYPE)
     #screen_coords = np.flip(screen_coords, axis=0)
     for i,s in enumerate(shape):
         screen_coords[i] -= 0.5 * (s-1)
+
+    if antialias:
+        if rng is None:
+            rng = np.random.default_rng()
+        screen_coords += rng.uniform(-0.5, 0.5, size=screen_coords.shape)
+
     screen_coords = np.concatenate(
-        [screen_coords,np.full((1,)+shape,r,dtype=FLOAT_DTYPE)],
+        [screen_coords,np.full((1,)+shape,r)],
         axis=0
-    )
+    ).astype(FLOAT_DTYPE)
     screen_coords /= np.linalg.norm(screen_coords, axis=0)[None]
+
     screen_coords = np.moveaxis(screen_coords, 0, -1)
+
     if flatten:
         screen_coords.shape = (-1, screen_coords.shape[-1])
+
     return screen_coords
 
 
@@ -573,6 +696,22 @@ def rotate_vectors(x, dim0, dim1, theta):
     x[...,(dim0,dim1)] = y
 
 
+def gen_camera_rays(camera, flatten=False, antialias=False, rng=None):
+    rays = {}
+    rays['v'] = gnomonic_projection(
+        camera['fov'],
+        camera['shape'],
+        flatten=flatten,
+        antialias=antialias,
+        rng=rng
+    )
+    rays['x0'] = np.tile(
+        camera['x0'],
+        (rays['v'].shape[0], 1)
+    ).astype(FLOAT_DTYPE)
+    return rays
+
+
 def main():
     #x = np.arange(12)
     #x.shape = (4,3)
@@ -580,13 +719,13 @@ def main():
     #rotate_vectors(x, 0, 1, np.pi/4.)
     #return 0
 
+    rng = np.random.default_rng(5)
+
     # Generate random scene
-    #rng = np.random.default_rng(4)
     #n_dim = 2
-    #camera_shape = (20,)
+    #camera_shape = (1,)
     #n_planes = 4
     #n_spheres = 3
-    ##x0,v,p0,pn,pc,pr = gen_rand_scene(n_dim, camera_shape, n_planes, rng=rng)
     #camera, scene = gen_rand_scene(
     #    n_dim, camera_shape,
     #    n_planes, n_spheres,
@@ -594,35 +733,85 @@ def main():
     #)
     #print(scene)
 
-    camera, scene = load_scene('box_with_light.json')
+    scene_fname = 'diffuse_box_with_light.json'
+    #scene_fname = 'test_scene_2d.json'
+    camera, scene = load_scene(scene_fname)
     n_dim = scene['n_dim']
     camera_shape = camera['shape']
-    x0 = camera['x0']
-    v = camera['v']
     print(scene)
 
     # Plot scene
     if n_dim == 2:
-        fig = plot_scene(camera, scene, recursion_depth=3)
-        fig.savefig('ray_diagram_2d.svg')
+        camera_rays = gen_camera_rays(camera, flatten=True)
+        fig,ax = plot_scene(camera_rays, scene, recursion_depth=3, rng=rng)
+        plt_fname_base = os.path.splitext(scene_fname)[0]
+        fig.savefig(
+            f'plots/{plt_fname_base}_ray_diagram.svg',
+            transparent=False
+        )
+        xlim = ax.get_xlim()
+        xlim = (3*xlim[0], 3*xlim[1])
+        ax.set_xlim(xlim)
+        ax.set_ylim(xlim)
+        fig.savefig(
+            f'plots/{plt_fname_base}_ray_diagram_zoomout.svg',
+            transparent=False
+        )
         #plt.show()
 
     # Render scene
-    from tqdm import tqdm
-    n_frames = 360
+    if n_dim != 3:
+        return 0
 
-    for max_depth in range(4,5):
+    from tqdm import tqdm
+    n_frames = 1
+    n_samples = 1024
+    gamma = 0.30
+    scene_name = 'test'#'diffuse_box_with_light'
+
+    for max_depth in range(2,3):
         print(f'Rendering scene at max depth {max_depth} ...')
-        v_rot = camera['v'].copy()
+        n_pix = np.prod(camera_shape)
+        pixel_value_max = None
 
         for frame in tqdm(range(n_frames)):
-            pixel_color = render_rays_recursive(
-                max_depth,
-                camera['x0'], v_rot,
-                scene,
-                collect_rays=False
+            pixel_color = np.zeros(
+                (n_pix, scene['n_channels']),
+                dtype=FLOAT_DTYPE
             )
-            pixel_color /= np.max(pixel_color)
+            for k in tqdm(range(n_samples)):
+                camera_rays = gen_camera_rays(
+                    camera,
+                    flatten=True,
+                    antialias=True,
+                    rng=rng
+                )
+                phi = 2*np.pi * frame/n_frames
+                rotate_vectors(camera_rays['v'], 2, 0, -0.10*np.pi*np.sin(phi))
+                #rotate_vectors(camera_rays['v'], 2, 0, -phi)
+                camera_rays['x0'][:,0] += 0.3 * np.sin(phi)
+                pixel_color += render_rays_recursive(
+                    max_depth,
+                    camera_rays['x0'],
+                    camera_rays['v'],
+                    scene,
+                    n_diffuse=4,
+                    collect_rays=False,
+                    rng=rng
+                )
+            pixel_intensity = np.linalg.norm(pixel_color, axis=1)
+            #print('pixel_intensity', pixel_intensity)
+            #print('pixel_color', pixel_color)
+            pixel_color *= (pixel_intensity**(gamma-1.))[:,None]
+            pixel_color[~np.isfinite(pixel_color)] = 0
+            #print('pixel_color', pixel_color)
+            #print(f'pixel_color.shape = {pixel_color.shape}')
+            #print('max(pixel_color):', np.max(pixel_color))
+            if pixel_value_max is None:
+                pixel_value_max = np.percentile(pixel_color, 99.5)
+            #print(np.percentile(pixel_color, [90., 95., 99., 99.5]))
+            #pixel_color /= np.max(pixel_color)
+            pixel_color /= pixel_value_max
             if n_dim == 2:
                 pixel_color.shape = (1,)+pixel_color.shape
             elif n_dim == 3:
@@ -632,13 +821,12 @@ def main():
             #print(pixel_color.shape)
             im = Image.fromarray(pixel_color, mode='RGB')
             im.save(
-                'frames/rendered_scene'
+                f'frames/{scene_name}'
                 f'_maxdepth{max_depth}'
                 f'_frame{frame:05d}'
                 '.png'
             )
 
-            rotate_vectors(v_rot, 2, 0, 2*np.pi/n_frames)
             #print(v_rot)
             #print(pixel_color)
 
