@@ -7,6 +7,8 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+import os
+
 
 ## Numeric identifiers for different object types
 #PLANE = 0
@@ -76,7 +78,7 @@ def sphere_intersection(x0, v, p0, r, unroll_multiple_intersections=True):
 def sphere_normal(x0, p0):
     """
     Computes the normal to a sphere at the point x0 (assumed to be on the
-    sphere, though this is not verified.
+    sphere, though this is not verified inside the routine.
 
     Inputs:
         x0 (np.ndarray): Coords of ray origin. Shape = (# spheres, # dims).
@@ -85,12 +87,12 @@ def sphere_normal(x0, p0):
     Outputs:
         n (np.ndarray): Normal vectors. Shape = (# spheres, # dims).
     """
-    rho = p0 - x0
+    rho = x0 - p0
     rho /= np.linalg.norm(rho, axis=1)[:,None]
     return rho
 
 
-def find_closest_intersections(t, eps=1e-10):
+def find_closest_intersections(t, eps=1e-5 if FLOAT_DTYPE=='f4' else 1e-8):
     t[t<eps] = np.inf
     idx = np.argmin(t, axis=1)
     return idx, t[np.arange(len(idx)),idx]
@@ -127,7 +129,11 @@ def plot_scene(rays, scene, recursion_depth=3, rng=None):
     p0 = scene['planes']['p0']
     pn = scene['planes']['n']
     pc = scene['planes']['color']
-    pr = scene['planes']['reflectivity']
+    pr = (
+        scene['planes']['reflectivity']
+      + scene['planes']['diffusivity']
+    ) + 0.1
+    pr /= np.max(pr,axis=1)[:,None] + 1.e-8
     for pp,nn,cc,rr in zip(p0,pn,pc,pr):
         ax.scatter([pp[0]], [pp[1]], color=cc)
         ax.arrow(
@@ -147,8 +153,13 @@ def plot_scene(rays, scene, recursion_depth=3, rng=None):
     # Draw spheres
     s0 = scene['spheres']['p0']
     srad = scene['spheres']['r']
-    sc = scene['spheres']['color']
-    srefl = scene['spheres']['reflectivity']
+    sc = scene['spheres']['color']# + scene['spheres']['diffusivity']
+    #sc /= np.max(sc, axis=1)[:,None] + 1.e-8
+    srefl = (
+        scene['spheres']['reflectivity']
+      + scene['spheres']['diffusivity']
+    ) + 0.1
+    srefl /= np.max(srefl,axis=1)[:,None] + 1.e-8
     for pp,rad,cc,refl in zip(s0,srad,sc,srefl):
         ax.add_patch(patches.Circle(
             pp, radius=rad,
@@ -159,18 +170,28 @@ def plot_scene(rays, scene, recursion_depth=3, rng=None):
         ))
 
     # Draw intersections
-    c_norm = np.max(ray_props['ray_value'])
+    c_norm = np.max(ray_props['ray_value']) + 1.e-8
     idx = np.isfinite(ray_props['t'])
     xp = (
         ray_props['x0'][idx,:]
       + ray_props['v'][idx,:]*ray_props['t'][idx,None]
     )
-    for xx,xo,vv,cc in zip(xp, ray_props['x0'][idx],
-                           ray_props['v'][idx],
-                           ray_props['ray_value'][idx]
-                          ):
+    for xx,xo,vv,cc,nn in zip(xp, ray_props['x0'][idx],
+                              ray_props['v'][idx],
+                              ray_props['ray_value'][idx],
+                              ray_props['n']#[idx]
+                             ):
         ax.scatter([xx[0]], [xx[1]], color=cc/c_norm)
         ax.plot([xo[0],xx[0]],[xo[1],xx[1]], color=cc/c_norm, alpha=0.8)
+        if np.sum(nn**2) > 1.e-5:
+            ax.arrow(
+                xx[0], xx[1],
+                0.25*nn[0], 0.25*nn[1],
+                color='orange',
+                head_width=0.05,
+                #zorder=10000,
+                alpha=0.5
+            )
 
     # Draw rays that go to infinity
     for xo,vv in zip(ray_props['x0'][~idx], ray_props['v'][~idx]):
@@ -193,8 +214,16 @@ def plot_scene(rays, scene, recursion_depth=3, rng=None):
             alpha=0.5
         )
 
-    ax.set_xlim(-10, 10)
-    ax.set_ylim(-10, 10)
+    # Find most distant object in scene
+    x_max = 1.5 * max([
+        np.max(np.abs(scene['planes']['p0'])),
+        np.max(np.abs(scene['spheres']['p0'])+scene['spheres']['r']),
+    ])
+    xlim = [-x_max, x_max]
+    ax.set_xlim(xlim)
+    ax.set_ylim(xlim)
+    #ax.set_xlim(-10, 10)
+    #ax.set_ylim(-10, 10)
 
     return fig, ax
 
@@ -380,6 +409,7 @@ def render_rays_recursive(
                           collect_rays=False,
                           #ray_parent_id=None,
                           #ray_contribution=None,
+                          n_diffuse=4,
                           recursion_depth=0,
                           rng=None
                          ):
@@ -495,6 +525,7 @@ def render_rays_recursive(
                 'x0': [x0],
                 'v': [v],
                 't': [t_close],
+                'n': [np.zeros_like(v)],
                 'ray_value': [ray_value]
             }
             return ray_value, ray_props
@@ -527,8 +558,11 @@ def render_rays_recursive(
         x_i[idx_is_sphere],
         scene['spheres']['p0'][sphere_id]
     )
-    print('')
-    print(np.mean(n[idx_is_sphere][sphere_id==1], axis=0))
+    #print(x_i[idx_is_sphere]),
+    #print(scene['spheres']['p0'][sphere_id])
+    #print(n[idx_is_sphere])
+    #print('')
+    #print(np.mean(n[idx_is_sphere][sphere_id==1], axis=0))
     reflect[idx_is_sphere] = scene['spheres']['reflectivity'][sphere_id]
     diffuse[idx_is_sphere] = scene['spheres']['diffusivity'][sphere_id]
 
@@ -539,11 +573,12 @@ def render_rays_recursive(
     child_parent_idx.append(ray_idx)
 
     # Spawn diffuse reflection at each intersection
-    x0_child.append(x_i)
-    vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
-    v_child.append(vo)
-    child_contrib.append(diffuse*cos_phi[:,None])
-    child_parent_idx.append(ray_idx)
+    for k in range(n_diffuse):
+        x0_child.append(x_i)
+        vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
+        v_child.append(vo)
+        child_contrib.append(diffuse*cos_phi[:,None]/n_diffuse)
+        child_parent_idx.append(ray_idx)
 
     # Combine all types of child rays into one array
     x0_child = np.concatenate(x0_child, axis=0)
@@ -572,6 +607,7 @@ def render_rays_recursive(
         recursion_limit,
         x0_child, v_child,
         scene,
+        n_diffuse=n_diffuse,
         collect_rays=collect_rays,
         recursion_depth=recursion_depth+1,
         rng=rng
@@ -592,6 +628,7 @@ def render_rays_recursive(
             'x0': [x0],
             'v': [v],
             't': [t_close],
+            'n': [n],
             'ray_value': [ray_value]
         }
         for key in ray_props_ret:
@@ -696,7 +733,9 @@ def main():
     #)
     #print(scene)
 
-    camera, scene = load_scene('diffuse_box_with_light.json')
+    scene_fname = 'diffuse_box_with_light.json'
+    #scene_fname = 'test_scene_2d.json'
+    camera, scene = load_scene(scene_fname)
     n_dim = scene['n_dim']
     camera_shape = camera['shape']
     print(scene)
@@ -704,11 +743,20 @@ def main():
     # Plot scene
     if n_dim == 2:
         camera_rays = gen_camera_rays(camera, flatten=True)
-        fig,ax = plot_scene(camera_rays, scene, recursion_depth=10)
-        fig.savefig('ray_diagram_2d.svg')
-        ax.set_xlim(-30, 30)
-        ax.set_ylim(-30, 30)
-        fig.savefig('ray_diagram_2d_zoomout.svg')
+        fig,ax = plot_scene(camera_rays, scene, recursion_depth=3, rng=rng)
+        plt_fname_base = os.path.splitext(scene_fname)[0]
+        fig.savefig(
+            f'plots/{plt_fname_base}_ray_diagram.svg',
+            transparent=False
+        )
+        xlim = ax.get_xlim()
+        xlim = (3*xlim[0], 3*xlim[1])
+        ax.set_xlim(xlim)
+        ax.set_ylim(xlim)
+        fig.savefig(
+            f'plots/{plt_fname_base}_ray_diagram_zoomout.svg',
+            transparent=False
+        )
         #plt.show()
 
     # Render scene
@@ -716,12 +764,12 @@ def main():
         return 0
 
     from tqdm import tqdm
-    n_frames = 3600
-    n_samples = 64
-    gamma = 0.5
-    scene_name = 'diffuse_box_with_light'
+    n_frames = 1
+    n_samples = 1024
+    gamma = 0.30
+    scene_name = 'test'#'diffuse_box_with_light'
 
-    for max_depth in range(5,6):
+    for max_depth in range(2,3):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
@@ -747,6 +795,7 @@ def main():
                     camera_rays['x0'],
                     camera_rays['v'],
                     scene,
+                    n_diffuse=4,
                     collect_rays=False,
                     rng=rng
                 )
