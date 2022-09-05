@@ -255,6 +255,9 @@ def load_scene(fname):
             if len(d[geom][prop]) == 0:
                 d[geom][prop].shape = (0,n_channels)
 
+    # Ambient color
+    d['ambient_color'] = np.array(d['ambient_color'])
+
     # Camera
     camera = d.pop('camera')
     camera['shape'] = tuple(camera['shape'])
@@ -490,7 +493,9 @@ def render_rays_recursive(
     #print('t_close', t_close)
 
     # Identify rays with an intersection (i.e., t not infinite)
-    ray_idx = np.where(np.isfinite(t_close))[0]
+    ray_idx = np.isfinite(t_close)
+    ambient_ray_idx = np.where(~ray_idx)[0] # Rays that go to infinity
+    ray_idx = np.where(ray_idx)[0]
     obj_idx = close_idx[ray_idx]
     #plane_idx = close_idx[ray_idx]
     #print('ray_idx', ray_idx)
@@ -518,6 +523,9 @@ def render_rays_recursive(
     #print('ray_idx_sphere', ray_idx_sphere)
     ray_value[ray_idx_plane] = scene['planes']['color'][plane_id]
     ray_value[ray_idx_sphere] = scene['spheres']['color'][sphere_id]
+
+    # Add ambient light
+    ray_value[ambient_ray_idx] = scene['ambient_color'][None,:]
 
     if (recursion_depth >= recursion_limit) or (len(t_close) == 0):
         if collect_rays:
@@ -766,11 +774,11 @@ def main():
 
     from tqdm import tqdm
     n_frames = 1
-    n_samples = 8
+    n_samples = 256
     gamma = 0.30
-    scene_name = 'test'#'diffuse_box_with_light'
+    scene_name = 'test3'#'diffuse_box_with_light'
 
-    for max_depth in range(2,3):
+    for max_depth in range(3,4):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
