@@ -733,7 +733,8 @@ def main():
     #)
     #print(scene)
 
-    scene_fname = 'diffuse_box_with_light.json'
+    scene_fname = 'plane_with_sphere.json'
+    #scene_fname = 'diffuse_box_with_light.json'
     #scene_fname = 'test_scene_2d.json'
     camera, scene = load_scene(scene_fname)
     n_dim = scene['n_dim']
@@ -765,7 +766,7 @@ def main():
 
     from tqdm import tqdm
     n_frames = 1
-    n_samples = 1024
+    n_samples = 8
     gamma = 0.30
     scene_name = 'test'#'diffuse_box_with_light'
 
@@ -819,7 +820,7 @@ def main():
                 pixel_color = np.swapaxes(pixel_color, 0, 1)
             pixel_color = np.clip(255*pixel_color,0.,255.).astype('u1')
             #print(pixel_color.shape)
-            im = Image.fromarray(pixel_color, mode='RGB')
+            im = Image.fromarray(pixel_color[::-1,:,:], mode='RGB')
             im.save(
                 f'frames/{scene_name}'
                 f'_maxdepth{max_depth}'
