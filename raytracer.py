@@ -215,10 +215,10 @@ def plot_scene(rays, scene, recursion_depth=3, rng=None):
         )
 
     # Find most distant object in scene
-    x_max = 1.5 * max([
-        np.max(np.abs(scene['planes']['p0'])),
-        np.max(np.abs(scene['spheres']['p0'])+scene['spheres']['r']),
-    ])
+    x_max = 1.5 * np.max(np.hstack([
+        np.abs(scene['planes']['p0']).flat,
+        (np.abs(scene['spheres']['p0'])+scene['spheres']['r'][:,None]).flat
+    ]))
     xlim = [-x_max, x_max]
     ax.set_xlim(xlim)
     ax.set_ylim(xlim)
@@ -254,6 +254,10 @@ def load_scene(fname):
             d[geom][prop] = np.array(d[geom][prop], dtype=FLOAT_DTYPE)
             if len(d[geom][prop]) == 0:
                 d[geom][prop].shape = (0,n_channels)
+        print(d[geom]['refract'])
+        d[geom]['refract'] = np.array(d[geom]['refract'], dtype=FLOAT_DTYPE)
+        if len(d[geom]['refract']) == 0:
+            d[geom]['refract'].shape = (0,2)
 
     # Ambient color
     d['ambient_color'] = np.array(d['ambient_color'])
@@ -405,6 +409,49 @@ def diffuse_reflection_outgoing(vi, n, rng):
     return vo, cos_phi
 
 
+def refraction_outgoing(vi, n, n1, n2):
+    """
+    Calculates the directions and strengths of both transmitted and
+    reflected rays, using Snell's Law and the Fresnel equations.
+    """
+
+    # Calculate direction of transmitted ray using Snell's Law.
+    # Formulate as linear combination of incoming and normal vector:
+    #   v_t = a*v_i - b*n
+    xi = np.sum(vi*n, axis=1)
+    idx_flipnormal = (xi > 0) # Normal should not be aligned w/ incoming ray
+    xi[idx_flipnormal] *= -1
+
+    a = n1 / n2 # As n2 -> inf, a -> 0, so outgoing ray antialigned w/ normal
+    a[idx_flipnormal] = 1 / a[idx_flipnormal]
+
+    delta = a**2 * (xi**2 - 1) + 1
+    b = a*xi + np.sqrt(delta)
+    b[idx_flipnormal] *= -1
+
+    vt = a[:,None]*vi - b[:,None]*n
+
+    # Reflected ray
+    vr = mirror_reflection_outgoing(vi, n)
+
+    # Reflection coefficients for s and p polarizations
+    cos_theta_i = -xi
+    cos_theta_t = np.abs(np.sum(vt*n, axis=1))
+    aa = n1*cos_theta_i
+    bb = n2*cos_theta_t
+    R_s = np.abs((aa-bb)/(aa+bb))
+    aa = n1*cos_theta_t
+    bb = n2*cos_theta_i
+    R_p = np.abs((aa-bb)/(aa+bb))
+    R = 0.5 * (R_s + R_p) # Assume unpolarized light
+
+    # Total (internal) reflection
+    idx_reflectall = ~np.isfinite(R)
+    R[idx_reflectall] = 1.
+
+    return vt, vr, R
+
+
 def render_rays_recursive(
                           recursion_limit,
                           x0, v, # Ray properties
@@ -551,26 +598,42 @@ def render_rays_recursive(
     # Determine intersection normals
     n_intersects = ray_idx.shape[0]
     n = np.empty(shape=(n_intersects,n_dim), dtype=FLOAT_DTYPE)
+    n[idx_is_plane] = scene['planes']['n'][plane_id]
+    n[idx_is_sphere] = sphere_normal(
+        x_i[idx_is_sphere],
+        scene['spheres']['p0'][sphere_id]
+    )
+
+    # Refractive index arrays
+    refract = np.empty(shape=(n_intersects,2), dtype=FLOAT_DTYPE)
+    refract[idx_is_plane] = scene['planes']['refract'][plane_id]
+    refract[idx_is_sphere] = scene['spheres']['refract'][sphere_id]
+
+    # Spawn transmitted and reflected rays from refraction
+    idx_refract = np.all(np.abs(refract) > 0.999, axis=1)
+    v_t,v_r,R = refraction_outgoing(
+        v_i[idx_refract],
+        n[idx_refract],
+        refract[idx_refract,0],
+        refract[idx_refract,1]
+    )
+    for vv,RR in [(v_r,R),(v_t,1-R)]:
+        RR.shape = (-1,1)
+        RR = np.repeat(RR, n_channels, axis=1)
+        x0_child.append(x_i[idx_refract])
+        v_child.append(vv)
+        child_contrib.append(RR)
+        child_parent_idx.append(ray_idx[idx_refract])
 
     # Empty reflectivity and diffusivity arrays
     reflect = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
     diffuse = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
 
-    # Plane normals, reflectivity, diffusivity, etc.
-    n[idx_is_plane] = scene['planes']['n'][plane_id]
+    # Plane reflectivity, diffusivity, etc.
     reflect[idx_is_plane] = scene['planes']['reflectivity'][plane_id]
     diffuse[idx_is_plane] = scene['planes']['diffusivity'][plane_id]
 
-    # Sphere normals, reflectivity, diffusivity, etc.
-    n[idx_is_sphere] = sphere_normal(
-        x_i[idx_is_sphere],
-        scene['spheres']['p0'][sphere_id]
-    )
-    #print(x_i[idx_is_sphere]),
-    #print(scene['spheres']['p0'][sphere_id])
-    #print(n[idx_is_sphere])
-    #print('')
-    #print(np.mean(n[idx_is_sphere][sphere_id==1], axis=0))
+    # Sphere reflectivity, diffusivity, etc.
     reflect[idx_is_sphere] = scene['spheres']['reflectivity'][sphere_id]
     diffuse[idx_is_sphere] = scene['spheres']['diffusivity'][sphere_id]
 
@@ -744,6 +807,7 @@ def main():
     scene_fname = 'plane_with_sphere.json'
     #scene_fname = 'diffuse_box_with_light.json'
     #scene_fname = 'test_scene_2d.json'
+    #scene_fname = 'test_refraction_2d_simple.json'
     camera, scene = load_scene(scene_fname)
     n_dim = scene['n_dim']
     camera_shape = camera['shape']
@@ -752,7 +816,7 @@ def main():
     # Plot scene
     if n_dim == 2:
         camera_rays = gen_camera_rays(camera, flatten=True)
-        fig,ax = plot_scene(camera_rays, scene, recursion_depth=3, rng=rng)
+        fig,ax = plot_scene(camera_rays, scene, recursion_depth=2, rng=rng)
         plt_fname_base = os.path.splitext(scene_fname)[0]
         fig.savefig(
             f'plots/{plt_fname_base}_ray_diagram.svg',
@@ -774,11 +838,11 @@ def main():
 
     from tqdm import tqdm
     n_frames = 1
-    n_samples = 256
+    n_samples = 64
     gamma = 0.30
-    scene_name = 'test3'#'diffuse_box_with_light'
+    scene_name = 'test2'#'diffuse_box_with_light'
 
-    for max_depth in range(3,4):
+    for max_depth in range(5,6):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None

@@ -1,0 +1,44 @@
+{
+  "n_dim": 2,
+  "n_channels": 3,
+  "planes": {
+    "p0": [
+      [0, 5]
+    ],
+    "n": [
+      [0, 1]
+    ],
+    "color": [
+      [0.0, 0.0, 0.0]
+    ],
+    "reflectivity": [
+      [0.0, 0.0, 0.0]
+    ],
+    "diffusivity": [
+      [0.0, 0.0, 0.0]
+    ],
+    "refract": [
+      [1.0, 2.0]
+    ]
+  },
+  "spheres": {
+    "p0": [
+    ],
+    "r": [
+    ],
+    "color": [
+    ],
+    "reflectivity": [
+    ],
+    "diffusivity": [
+    ],
+    "refract": [
+    ]
+  },
+  "ambient_color": [0.0, 0.0, 0.0],
+  "camera": {
+    "shape": [15],
+    "fov": 70.0,
+    "x0": [0.0, -5.0]
+  }
+}
