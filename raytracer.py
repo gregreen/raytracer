@@ -837,12 +837,14 @@ def main():
         return 0
 
     from tqdm import tqdm
-    n_frames = 1
+    n_frames = 90
     n_samples = 64
-    gamma = 0.30
-    scene_name = 'test2'#'diffuse_box_with_light'
+    gamma = 0.20
+    scene_name = 'bobbing_spheres'#'diffuse_box_with_light'
 
-    for max_depth in range(5,6):
+    spheres_p0 = scene['spheres']['p0'].copy()
+
+    for max_depth in range(6,7):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
@@ -860,15 +862,25 @@ def main():
                     rng=rng
                 )
                 phi = 2*np.pi * frame/n_frames
-                rotate_vectors(camera_rays['v'], 2, 0, -0.10*np.pi*np.sin(phi))
+                #rotate_vectors(camera_rays['v'], 2, 0, -0.10*np.pi*np.sin(phi))
                 #rotate_vectors(camera_rays['v'], 2, 0, -phi)
-                camera_rays['x0'][:,0] += 0.3 * np.sin(phi)
+                #camera_rays['x0'][:,0] += 0.3 * np.sin(phi)
+
+                dp0 = np.array([
+                    [0.1*np.cos(phi), 0.3*np.sin(phi), 0.],
+                    [0., 0., 0.],
+                    [0., 0.5*np.cos(phi), 0.],
+                    [0., 0., 0.],
+                    [0., 0., 0.]
+                ])
+                scene['spheres']['p0'] = spheres_p0+dp0
+
                 pixel_color += render_rays_recursive(
                     max_depth,
                     camera_rays['x0'],
                     camera_rays['v'],
                     scene,
-                    n_diffuse=4,
+                    n_diffuse=3,
                     collect_rays=False,
                     rng=rng
                 )
