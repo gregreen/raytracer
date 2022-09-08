@@ -881,7 +881,7 @@ def main():
     #)
     #print(scene)
 
-    scene_fname = 'triangle.json'
+    scene_fname = 'marbles_triangle.json'
     #scene_fname = 'plane_with_sphere.json'
     #scene_fname = 'diffuse_box_with_light.json'
     #scene_fname = 'test_scene_2d.json'
@@ -919,11 +919,11 @@ def main():
     n_samples = 64
     gamma = 0.20
     #scene_name = 'bobbing_spheres'#'diffuse_box_with_light'
-    scene_name = 'triangle'
+    scene_name = 'marbles_triangle'
 
     #spheres_p0 = scene['spheres']['p0'].copy()
 
-    for max_depth in range(4,5):
+    for max_depth in range(5,6):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
