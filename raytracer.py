@@ -332,6 +332,9 @@ def load_scene(fname):
         x0,r = calc_bounding_sphere(tm['vertices'][i])
         tm['bounds']['x0'][i] = x0
         tm['bounds']['r'][i] = r
+        n_verts = tm['vertices'][i].shape[0]
+        n_faces = tm['faces'][i].shape[0]
+        print(f'Triangle mesh {i}: {n_faces} faces, {n_verts} vertices.')
 
     # Material properties (all object geometries)
     for geom in ('planes', 'spheres', 'triangles', 'triangle_meshes'):
@@ -993,7 +996,7 @@ def main():
     #)
     #print(scene)
 
-    scene_fname = 'triangle_mesh.json'
+    scene_fname = 'teapot_scene.json'
     #scene_fname = 'plane_with_sphere.json'
     #scene_fname = 'diffuse_box_with_light.json'
     #scene_fname = 'test_scene_2d.json'
@@ -1027,33 +1030,33 @@ def main():
         return 0
 
     from tqdm import tqdm
-    n_frames = 60
-    n_samples = 64
+    n_frames = 1
+    n_samples = 256
     gamma = 0.20
     #scene_name = 'bobbing_spheres'#'diffuse_box_with_light'
-    scene_name = 'triangle_mesh_spheres'
+    scene_name = 'teapot_scene'
 
     #spheres_p0 = scene['spheres']['p0'].copy()
-    verts = scene['triangle_meshes']['vertices'][0].copy()
-    rotate_vectors(
-        verts,
-        2, 1,
-        -0.1*np.pi
-    )
+    #verts = scene['triangle_meshes']['vertices'][0].copy()
+    #rotate_vectors(
+    #    verts,
+    #    2, 1,
+    #    -0.1*np.pi
+    #)
 
-    for max_depth in range(5,6):
+    for max_depth in range(2,3):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
 
         for frame in tqdm(range(n_frames)):
             phi = 2*np.pi * frame/n_frames
-            scene['triangle_meshes']['vertices'][0] = verts.copy()
-            rotate_vectors(
-                scene['triangle_meshes']['vertices'][0],
-                2, 0,
-                -phi
-            )
+            #scene['triangle_meshes']['vertices'][0] = verts.copy()
+            #rotate_vectors(
+            #    scene['triangle_meshes']['vertices'][0],
+            #    2, 0,
+            #    -phi
+            #)
 
             pixel_color = np.zeros(
                 (n_pix, scene['n_channels']),
