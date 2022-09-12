@@ -549,6 +549,7 @@ def render_rays_recursive(
                           #ray_contribution=None,
                           n_diffuse=4,
                           recursion_depth=0,
+                          batch_size=1024,
                           rng=None
                          ):
     """
@@ -597,307 +598,326 @@ def render_rays_recursive(
     if rng is None:
         rng = np.random.default_rng()
 
-    n_rays, n_dim = x0.shape
+    # Some basic scene data
     n_channels = scene['n_channels']
-
-    ray_value = np.zeros((n_rays, n_channels), dtype=FLOAT_DTYPE)
-
-    # Empty array for all intersections
     n_planes = len(scene['planes']['p0'])
     n_spheres = len(scene['spheres']['p0'])
     n_triangles = len(scene['triangles']['p'])
     n_tm = len(scene['triangle_meshes']['faces']) # triangle meshes
-    #print('n_tm', n_tm)
-    n_intersections = n_planes + 2*n_spheres + n_triangles + n_tm
-    t = np.empty((n_rays, n_intersections), dtype=FLOAT_DTYPE)
 
-    i0_plane, i1_plane = (0, n_planes)
-    i0_sphere, i1_sphere = (i1_plane, i1_plane+2*n_spheres)
-    i0_triangle, i1_triangle = (i1_sphere, i1_sphere+n_triangles)
-    i0_tm, i1_tm = (i1_triangle, i1_triangle+n_tm)
+    # Data on all arrays
+    n_rays_all, n_dim = x0.shape
+    x0_all, v_all = x0, v
+    ray_value_all = np.zeros((n_rays_all, n_channels), dtype=FLOAT_DTYPE)
 
-    # Plane intersections. Shape = (# of rays, # of planes)
-    t[:,i0_plane:i1_plane] = plane_intersection(
-        x0, v,
-        scene['planes']['p0'],
-        scene['planes']['n']
-    )
+    if collect_rays:
+        keys = ['x0', 'v', 't', 'n', 'ray_value']
+        ray_props = {k:[] for k in keys}
 
-    # Sphere intersections. Shape = (# of rays, # of spheres)
-    t[:,i0_sphere:i1_sphere] = sphere_intersection(
-        x0, v,
-        scene['spheres']['p0'],
-        scene['spheres']['r'],
-        unroll_multiple_intersections=True
-    )
+    # Loop over batches of rays
+    for r0 in range(0,n_rays_all,batch_size):
+        x0 = x0_all[r0:r0+batch_size]
+        v = v_all[r0:r0+batch_size]
 
-    # Triangle intersections. Shape = (# of rays, # of triangles)
-    t[:,i0_triangle:i1_triangle] = triangle_intersection(
-        x0, v,
-        scene['triangles']['p']
-    )
+        n_rays, n_dim = x0.shape
 
-    #n_tm = len(tm['vertices'])
-    #for i in range(n_tm):
-    #    t_i = triangle_intersection(
-    #        x0, v,
-    #        expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
-    #    )
-    #    print(t_i)
+        ray_value = np.zeros((n_rays, n_channels), dtype=FLOAT_DTYPE)
 
-    # Determine which rays intersect which triangle mesh bounding spheres
-    t_bounds = sphere_intersection(
-        x0, v,
-        scene['triangle_meshes']['bounds']['x0'],
-        scene['triangle_meshes']['bounds']['r'],
-        unroll_multiple_intersections=True
-    ) # shape = (ray, 2*mesh)
-    #print('t_bounds', t_bounds)
-    #print('t_bounds.shape', t_bounds.shape)
-    #tm_has_intersections = np.any(t_bounds > 0., axis=1)
-    tm = scene['triangle_meshes']
-    tm_child_idx = np.empty((n_rays,n_tm), dtype='u2')
-    #ray_idx_tm = [] # For each tm, indices of relevant rays
-    #close_idx_tm = [] # For each tm, indices of hit triangles
-    for i in range(n_tm):
-        # Identify rays that travel through bounding volume of mesh
-        ray_idx_i = (
-            ((t_bounds[:,2*i]>0.) & np.isfinite(t_bounds[:,2*i]))
-          | ((t_bounds[:,2*i+1]>0.) & np.isfinite(t_bounds[:,2*i+1]))
-        )
-        # Find intersections of relevant rays with all triangles in mesh
-        p_tm = expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
-        #print('ray_idx_tm_i', ray_idx_i)
-        #print(np.count_nonzero(ray_idx_i))
-        t_i = triangle_intersection(
-            x0[ray_idx_i], v[ray_idx_i],
-            expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
-        )
-        #print('t_i', t_i)
-        #print(f'finite t_i: {np.count_nonzero(np.isfinite(t_i))}')
-        #print('t_i.shape', t_i.shape)
-        close_idx_i, t_close_i = find_closest_intersections(t_i)
-        #print('close_idx_i', close_idx_i)
-        #print('t_close_i', t_close_i)
-        #print(f'finite t_close_i: {np.count_nonzero(np.isfinite(t_close_i))}')
-        t[ray_idx_i,i0_tm+i] = t_close_i
-        t[~ray_idx_i,i0_tm+i] = np.inf
-        tm_child_idx[ray_idx_i,i] = close_idx_i
-        #ray_idx_tm.append(ray_idx_i)
-        #close_idx_tm.append(close_idx_i)
+        # Empty array for all intersections
+        #print('n_tm', n_tm)
+        n_intersections = n_planes + 2*n_spheres + n_triangles + n_tm
+        t = np.empty((n_rays, n_intersections), dtype=FLOAT_DTYPE)
 
-    # For each ray, calculate closest intersections
-    close_idx, t_close = find_closest_intersections(t)
-    #print('close_idx', close_idx)
-    #print(np.count_nonzero(close_idx == 1))
-    #print('t_close', t_close)
+        i0_plane, i1_plane = (0, n_planes)
+        i0_sphere, i1_sphere = (i1_plane, i1_plane+2*n_spheres)
+        i0_triangle, i1_triangle = (i1_sphere, i1_sphere+n_triangles)
+        i0_tm, i1_tm = (i1_triangle, i1_triangle+n_tm)
 
-    # Identify rays with an intersection (i.e., t not infinite)
-    ray_idx = np.isfinite(t_close)
-    ambient_ray_idx = np.where(~ray_idx)[0] # Rays that go to infinity
-    ray_idx = np.where(ray_idx)[0]
-    obj_idx = close_idx[ray_idx]
-    #plane_idx = close_idx[ray_idx]
-    #print('ray_idx', ray_idx)
-    #print(f'ray_idx.shape = {ray_idx.shape}')
-    #print(f'obj_idx.shape = {obj_idx.shape}')
-
-    # Determine what type of object each ray intersects, and determine
-    # the index (ID) of that object in its respective object array.
-    idx_is_plane = (obj_idx >= i0_plane) & (obj_idx < i1_plane)
-    idx_is_sphere = (obj_idx >= i0_sphere) & (obj_idx < i1_sphere)
-    idx_is_triangle = (obj_idx >= i0_triangle) & (obj_idx < i1_triangle)
-    idx_is_tm = (obj_idx >= i0_tm) #& (obj_idx < i1_tm)
-    #print('idx_is_plane', idx_is_plane)
-    #print('idx_is_sphere', idx_is_sphere)
-    #print('idx_is_triangle', idx_is_triangle)
-    #print('idx_is_tm', idx_is_tm)
-    #print(f'idx_is_tm: {np.count_nonzero(idx_is_tm)/idx_is_tm.size*100}%')
-
-    plane_id = obj_idx[idx_is_plane]# - i0_plane
-    sphere_id = (obj_idx[idx_is_sphere] - i0_sphere) // 2
-    triangle_id = obj_idx[idx_is_triangle] - i0_triangle
-    tm_id = obj_idx[idx_is_tm] - i0_tm
-
-    ray_idx_plane = ray_idx[idx_is_plane]
-    ray_idx_sphere = ray_idx[idx_is_sphere]
-    ray_idx_triangle = ray_idx[idx_is_triangle]
-    ray_idx_tm = ray_idx[idx_is_tm]
-
-    # Determine sub-indices of intersected triangles in each triangle mesh
-    tm_child_id = tm_child_idx[ray_idx_tm, tm_id]
-    #print('tm_child_id', tm_child_id)
-    #print(np.unique(tm_child_id, return_counts=True))
-
-    #print('plane_id', plane_id)
-    #print('sphere_id', sphere_id)
-    #print('tm_id', tm_id)
-
-    # Add luminosity from sources that are directly hit
-    ray_value[ray_idx_plane] = scene['planes']['color'][plane_id]
-    ray_value[ray_idx_sphere] = scene['spheres']['color'][sphere_id]
-    ray_value[ray_idx_triangle] = scene['triangles']['color'][triangle_id]
-    ray_value[ray_idx_tm] = scene['triangle_meshes']['color'][tm_id]
-
-    # Add ambient light
-    ray_value[ambient_ray_idx] = scene['ambient_color'][None,:]
-
-    if (recursion_depth >= recursion_limit) or (len(t_close) == 0):
-        if collect_rays:
-            ray_props = {
-                'x0': [x0],
-                'v': [v],
-                't': [t_close],
-                'n': [np.zeros_like(v)],
-                'ray_value': [ray_value]
-            }
-            return ray_value, ray_props
-        return ray_value
-    
-    x0_child = []
-    v_child = []
-    child_contrib = []
-    child_parent_idx = []
-
-    # Calculate intersection coordinates and incoming direction
-    v_i = v[ray_idx]
-    x_i = x0[ray_idx] + v_i * t_close[ray_idx][:,None]
-
-    # Determine intersection normals
-    n_intersects = ray_idx.shape[0]
-    n = np.empty(shape=(n_intersects,n_dim), dtype=FLOAT_DTYPE)
-    n[idx_is_plane] = scene['planes']['n'][plane_id]
-    n[idx_is_sphere] = sphere_normal(
-        x_i[idx_is_sphere],
-        scene['spheres']['p0'][sphere_id]
-    )
-    n[idx_is_triangle] = triangle_normal(
-        scene['triangles']['p'][triangle_id]
-    )
-
-    idx_is_tm = np.where(idx_is_tm)[0]
-    tm = scene['triangle_meshes']
-    for i in range(n_tm):
-        idx = (tm_id == i)
-        tm_child_id_i = tm_child_id[idx]
-        verts = scene['triangle_meshes']['vertices'][i]
-        faces = scene['triangle_meshes']['faces'][i]
-        n[idx_is_tm[idx]] = triangle_normal(
-            verts[faces[tm_child_id_i]]
+        # Plane intersections. Shape = (# of rays, # of planes)
+        t[:,i0_plane:i1_plane] = plane_intersection(
+            x0, v,
+            scene['planes']['p0'],
+            scene['planes']['n']
         )
 
-    # Refractive index arrays
-    refract = np.empty(shape=(n_intersects,2), dtype=FLOAT_DTYPE)
-    refract[idx_is_plane] = scene['planes']['refract'][plane_id]
-    refract[idx_is_sphere] = scene['spheres']['refract'][sphere_id]
-    refract[idx_is_triangle] = scene['triangles']['refract'][triangle_id]
-    refract[idx_is_tm] = scene['triangle_meshes']['refract'][tm_id]
+        # Sphere intersections. Shape = (# of rays, # of spheres)
+        t[:,i0_sphere:i1_sphere] = sphere_intersection(
+            x0, v,
+            scene['spheres']['p0'],
+            scene['spheres']['r'],
+            unroll_multiple_intersections=True
+        )
 
-    # Spawn transmitted and reflected rays from refraction
-    idx_refract = np.all(np.abs(refract) > 0.999, axis=1)
-    v_t,v_r,R = refraction_outgoing(
-        v_i[idx_refract],
-        n[idx_refract],
-        refract[idx_refract,0],
-        refract[idx_refract,1]
-    )
-    for vv,RR in [(v_r,R),(v_t,1-R)]:
-        RR.shape = (-1,1)
-        RR = np.repeat(RR, n_channels, axis=1)
-        x0_child.append(x_i[idx_refract])
-        v_child.append(vv)
-        child_contrib.append(RR)
-        child_parent_idx.append(ray_idx[idx_refract])
+        # Triangle intersections. Shape = (# of rays, # of triangles)
+        t[:,i0_triangle:i1_triangle] = triangle_intersection(
+            x0, v,
+            scene['triangles']['p']
+        )
 
-    # Empty reflectivity and diffusivity arrays
-    reflect = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
-    diffuse = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
+        #n_tm = len(tm['vertices'])
+        #for i in range(n_tm):
+        #    t_i = triangle_intersection(
+        #        x0, v,
+        #        expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
+        #    )
+        #    print(t_i)
 
-    # Plane reflectivity, diffusivity, etc.
-    reflect[idx_is_plane] = scene['planes']['reflectivity'][plane_id]
-    diffuse[idx_is_plane] = scene['planes']['diffusivity'][plane_id]
+        # Determine which rays intersect which triangle mesh bounding spheres
+        t_bounds = sphere_intersection(
+            x0, v,
+            scene['triangle_meshes']['bounds']['x0'],
+            scene['triangle_meshes']['bounds']['r'],
+            unroll_multiple_intersections=True
+        ) # shape = (ray, 2*mesh)
+        #print('t_bounds', t_bounds)
+        #print('t_bounds.shape', t_bounds.shape)
+        #tm_has_intersections = np.any(t_bounds > 0., axis=1)
+        tm = scene['triangle_meshes']
+        tm_child_idx = np.empty((n_rays,n_tm), dtype='u2')
+        #ray_idx_tm = [] # For each tm, indices of relevant rays
+        #close_idx_tm = [] # For each tm, indices of hit triangles
+        for i in range(n_tm):
+            # Identify rays that travel through bounding volume of mesh
+            ray_idx_i = (
+                ((t_bounds[:,2*i]>0.) & np.isfinite(t_bounds[:,2*i]))
+              | ((t_bounds[:,2*i+1]>0.) & np.isfinite(t_bounds[:,2*i+1]))
+            )
+            # Find intersections of relevant rays with all triangles in mesh
+            p_tm = expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
+            #print('ray_idx_tm_i', ray_idx_i)
+            #print(np.count_nonzero(ray_idx_i))
+            t_i = triangle_intersection(
+                x0[ray_idx_i], v[ray_idx_i],
+                expand_triangle_mesh(tm['vertices'][i], tm['faces'][i])
+            )
+            #print('t_i', t_i)
+            #print(f'finite t_i: {np.count_nonzero(np.isfinite(t_i))}')
+            #print('t_i.shape', t_i.shape)
+            close_idx_i, t_close_i = find_closest_intersections(t_i)
+            #print('close_idx_i', close_idx_i)
+            #print('t_close_i', t_close_i)
+            #print(f'finite t_close_i: {np.count_nonzero(np.isfinite(t_close_i))}')
+            t[ray_idx_i,i0_tm+i] = t_close_i
+            t[~ray_idx_i,i0_tm+i] = np.inf
+            tm_child_idx[ray_idx_i,i] = close_idx_i
+            #ray_idx_tm.append(ray_idx_i)
+            #close_idx_tm.append(close_idx_i)
 
-    # Sphere reflectivity, diffusivity, etc.
-    reflect[idx_is_sphere] = scene['spheres']['reflectivity'][sphere_id]
-    diffuse[idx_is_sphere] = scene['spheres']['diffusivity'][sphere_id]
+        # For each ray, calculate closest intersections
+        close_idx, t_close = find_closest_intersections(t)
+        #print('close_idx', close_idx)
+        #print(np.count_nonzero(close_idx == 1))
+        #print('t_close', t_close)
 
-    # Triangle reflectivity, diffusivity, etc.
-    reflect[idx_is_triangle] = scene['triangles']['reflectivity'][triangle_id]
-    diffuse[idx_is_triangle] = scene['triangles']['diffusivity'][triangle_id]
+        # Identify rays with an intersection (i.e., t not infinite)
+        ray_idx = np.isfinite(t_close)
+        ambient_ray_idx = np.where(~ray_idx)[0] # Rays that go to infinity
+        ray_idx = np.where(ray_idx)[0]
+        obj_idx = close_idx[ray_idx]
+        #plane_idx = close_idx[ray_idx]
+        #print('ray_idx', ray_idx)
+        #print(f'ray_idx.shape = {ray_idx.shape}')
+        #print(f'obj_idx.shape = {obj_idx.shape}')
 
-    # Triangle mesh reflectivity, diffusivity, etc.
-    reflect[idx_is_tm] = scene['triangle_meshes']['reflectivity'][tm_id]
-    diffuse[idx_is_tm] = scene['triangle_meshes']['diffusivity'][tm_id]
+        # Determine what type of object each ray intersects, and determine
+        # the index (ID) of that object in its respective object array.
+        idx_is_plane = (obj_idx >= i0_plane) & (obj_idx < i1_plane)
+        idx_is_sphere = (obj_idx >= i0_sphere) & (obj_idx < i1_sphere)
+        idx_is_triangle = (obj_idx >= i0_triangle) & (obj_idx < i1_triangle)
+        idx_is_tm = (obj_idx >= i0_tm) #& (obj_idx < i1_tm)
+        #print('idx_is_plane', idx_is_plane)
+        #print('idx_is_sphere', idx_is_sphere)
+        #print('idx_is_triangle', idx_is_triangle)
+        #print('idx_is_tm', idx_is_tm)
+        #print(f'idx_is_tm: {np.count_nonzero(idx_is_tm)/idx_is_tm.size*100}%')
 
-    # Spawn mirror reflection at each intersection
-    x0_child.append(x_i)
-    v_child.append(mirror_reflection_outgoing(v_i, n))
-    child_contrib.append(reflect)
-    child_parent_idx.append(ray_idx)
+        plane_id = obj_idx[idx_is_plane]# - i0_plane
+        sphere_id = (obj_idx[idx_is_sphere] - i0_sphere) // 2
+        triangle_id = obj_idx[idx_is_triangle] - i0_triangle
+        tm_id = obj_idx[idx_is_tm] - i0_tm
 
-    # Spawn diffuse reflection at each intersection
-    for k in range(n_diffuse):
+        ray_idx_plane = ray_idx[idx_is_plane]
+        ray_idx_sphere = ray_idx[idx_is_sphere]
+        ray_idx_triangle = ray_idx[idx_is_triangle]
+        ray_idx_tm = ray_idx[idx_is_tm]
+
+        # Determine sub-indices of intersected triangles in each triangle mesh
+        tm_child_id = tm_child_idx[ray_idx_tm, tm_id]
+        #print('tm_child_id', tm_child_id)
+        #print(np.unique(tm_child_id, return_counts=True))
+
+        #print('plane_id', plane_id)
+        #print('sphere_id', sphere_id)
+        #print('tm_id', tm_id)
+
+        # Add luminosity from sources that are directly hit
+        ray_value[ray_idx_plane] = scene['planes']['color'][plane_id]
+        ray_value[ray_idx_sphere] = scene['spheres']['color'][sphere_id]
+        ray_value[ray_idx_triangle] = scene['triangles']['color'][triangle_id]
+        ray_value[ray_idx_tm] = scene['triangle_meshes']['color'][tm_id]
+
+        # Add ambient light
+        ray_value[ambient_ray_idx] = scene['ambient_color'][None,:]
+
+        if (recursion_depth >= recursion_limit) or (len(t_close) == 0):
+            if collect_rays:
+                ray_props['x0'].append(x0)
+                ray_props['v'].append(v)
+                ray_props['t'].append(t_close)
+                ray_props['n'].append(np.zeros_like(v))
+                ray_props['ray_value'].append(ray_value)
+            ray_value_all[r0:r0+batch_size] = ray_value
+            continue
+        
+        x0_child = []
+        v_child = []
+        child_contrib = []
+        child_parent_idx = []
+
+        # Calculate intersection coordinates and incoming direction
+        v_i = v[ray_idx]
+        x_i = x0[ray_idx] + v_i * t_close[ray_idx][:,None]
+
+        # Determine intersection normals
+        n_intersects = ray_idx.shape[0]
+        n = np.empty(shape=(n_intersects,n_dim), dtype=FLOAT_DTYPE)
+        n[idx_is_plane] = scene['planes']['n'][plane_id]
+        n[idx_is_sphere] = sphere_normal(
+            x_i[idx_is_sphere],
+            scene['spheres']['p0'][sphere_id]
+        )
+        n[idx_is_triangle] = triangle_normal(
+            scene['triangles']['p'][triangle_id]
+        )
+
+        idx_is_tm = np.where(idx_is_tm)[0]
+        tm = scene['triangle_meshes']
+        for i in range(n_tm):
+            idx = (tm_id == i)
+            tm_child_id_i = tm_child_id[idx]
+            verts = scene['triangle_meshes']['vertices'][i]
+            faces = scene['triangle_meshes']['faces'][i]
+            n[idx_is_tm[idx]] = triangle_normal(
+                verts[faces[tm_child_id_i]]
+            )
+
+        # Refractive index arrays
+        refract = np.empty(shape=(n_intersects,2), dtype=FLOAT_DTYPE)
+        refract[idx_is_plane] = scene['planes']['refract'][plane_id]
+        refract[idx_is_sphere] = scene['spheres']['refract'][sphere_id]
+        refract[idx_is_triangle] = scene['triangles']['refract'][triangle_id]
+        refract[idx_is_tm] = scene['triangle_meshes']['refract'][tm_id]
+
+        # Spawn transmitted and reflected rays from refraction
+        idx_refract = np.all(np.abs(refract) > 0.999, axis=1)
+        v_t,v_r,R = refraction_outgoing(
+            v_i[idx_refract],
+            n[idx_refract],
+            refract[idx_refract,0],
+            refract[idx_refract,1]
+        )
+        for vv,RR in [(v_r,R),(v_t,1-R)]:
+            RR.shape = (-1,1)
+            RR = np.repeat(RR, n_channels, axis=1)
+            x0_child.append(x_i[idx_refract])
+            v_child.append(vv)
+            child_contrib.append(RR)
+            child_parent_idx.append(ray_idx[idx_refract])
+
+        # Empty reflectivity and diffusivity arrays
+        reflect = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
+        diffuse = np.empty(shape=(n_intersects,n_channels), dtype=FLOAT_DTYPE)
+
+        # Plane reflectivity, diffusivity, etc.
+        reflect[idx_is_plane] = scene['planes']['reflectivity'][plane_id]
+        diffuse[idx_is_plane] = scene['planes']['diffusivity'][plane_id]
+
+        # Sphere reflectivity, diffusivity, etc.
+        reflect[idx_is_sphere] = scene['spheres']['reflectivity'][sphere_id]
+        diffuse[idx_is_sphere] = scene['spheres']['diffusivity'][sphere_id]
+
+        # Triangle reflectivity, diffusivity, etc.
+        reflect[idx_is_triangle] = scene['triangles']['reflectivity'][triangle_id]
+        diffuse[idx_is_triangle] = scene['triangles']['diffusivity'][triangle_id]
+
+        # Triangle mesh reflectivity, diffusivity, etc.
+        reflect[idx_is_tm] = scene['triangle_meshes']['reflectivity'][tm_id]
+        diffuse[idx_is_tm] = scene['triangle_meshes']['diffusivity'][tm_id]
+
+        # Spawn mirror reflection at each intersection
         x0_child.append(x_i)
-        vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
-        v_child.append(vo)
-        child_contrib.append(diffuse*cos_phi[:,None]/n_diffuse)
+        v_child.append(mirror_reflection_outgoing(v_i, n))
+        child_contrib.append(reflect)
         child_parent_idx.append(ray_idx)
 
-    # Combine all types of child rays into one array
-    x0_child = np.concatenate(x0_child, axis=0)
-    v_child = np.concatenate(v_child, axis=0)
-    child_contrib = np.concatenate(child_contrib, axis=0)
-    child_parent_idx = np.concatenate(child_parent_idx, axis=0)
+        # Spawn diffuse reflection at each intersection
+        for k in range(n_diffuse):
+            x0_child.append(x_i)
+            vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
+            v_child.append(vo)
+            child_contrib.append(diffuse*cos_phi[:,None]/n_diffuse)
+            child_parent_idx.append(ray_idx)
 
-    # Filter out rays with zero contribution
-    idx_contrib = np.any(child_contrib>1e-7, axis=1)
-    #print(
-    #    f'{np.count_nonzero(idx_contrib)} of {idx_contrib.size} '
-    #    'rays contribute.'
-    #)
-    x0_child = x0_child[idx_contrib]
-    v_child = v_child[idx_contrib]
-    child_contrib = child_contrib[idx_contrib]
-    child_parent_idx = child_parent_idx[idx_contrib]
+        # Combine all types of child rays into one array
+        x0_child = np.concatenate(x0_child, axis=0)
+        v_child = np.concatenate(v_child, axis=0)
+        child_contrib = np.concatenate(child_contrib, axis=0)
+        child_parent_idx = np.concatenate(child_parent_idx, axis=0)
 
-    #print(f'recursion depth: {recursion_depth}')
-    #print('x0:\n', x0_child)
-    #print('v:\n', v_child)
-    #print('')
+        # Filter out rays with zero contribution
+        idx_contrib = np.any(child_contrib>1e-7, axis=1)
+        #print(
+        #    f'{np.count_nonzero(idx_contrib)} of {idx_contrib.size} '
+        #    'rays contribute.'
+        #)
+        x0_child = x0_child[idx_contrib]
+        v_child = v_child[idx_contrib]
+        child_contrib = child_contrib[idx_contrib]
+        child_parent_idx = child_parent_idx[idx_contrib]
 
-    # Recursion: Add in values of spawned rays
-    ret = render_rays_recursive(
-        recursion_limit,
-        x0_child, v_child,
-        scene,
-        n_diffuse=n_diffuse,
-        collect_rays=collect_rays,
-        recursion_depth=recursion_depth+1,
-        rng=rng
-    )
+        #print(f'recursion depth: {recursion_depth}')
+        #print('x0:\n', x0_child)
+        #print('v:\n', v_child)
+        #print('')
+
+        # Recursion: Add in values of spawned rays
+        ret = render_rays_recursive(
+            recursion_limit,
+            x0_child, v_child,
+            scene,
+            n_diffuse=n_diffuse,
+            collect_rays=collect_rays,
+            recursion_depth=recursion_depth+1,
+            batch_size=batch_size,
+            rng=rng
+        )
+        if collect_rays:
+            ray_value_ret, ray_props_ret = ret
+        else:
+            ray_value_ret = ret
+
+        #print(f'ray_value.shape = {ray_value.shape}')
+        #print(f'child_parent_idx.shape = {child_parent_idx.shape}')
+        #print(f'child_contrib.shape = {child_contrib.shape}')
+        #print(f'ray_value_ret.shape = {ray_value_ret.shape}')
+        np.add.at(ray_value, child_parent_idx, child_contrib*ray_value_ret)
+
+        ray_value_all[r0:r0+batch_size] = ray_value
+
+        if collect_rays:
+            ray_props['x0'].append(x0)
+            ray_props['v'].append(v)
+            ray_props['t'].append(t_close)
+            ray_props['n'].append(n)
+            ray_props['ray_value'].append(ray_value)
+
+            for key in ray_props_ret:
+                ray_props[key] += ray_props_ret[key]
+
     if collect_rays:
-        ray_value_ret, ray_props_ret = ret
-    else:
-        ray_value_ret = ret
+        return ray_value_all, ray_props
 
-    #print(f'ray_value.shape = {ray_value.shape}')
-    #print(f'child_parent_idx.shape = {child_parent_idx.shape}')
-    #print(f'child_contrib.shape = {child_contrib.shape}')
-    #print(f'ray_value_ret.shape = {ray_value_ret.shape}')
-    np.add.at(ray_value, child_parent_idx, child_contrib*ray_value_ret)
-
-    if collect_rays:
-        ray_props = {
-            'x0': [x0],
-            'v': [v],
-            't': [t_close],
-            'n': [n],
-            'ray_value': [ray_value]
-        }
-        for key in ray_props_ret:
-            ray_props[key] += ray_props_ret[key]
-        return ray_value, ray_props
-    return ray_value
+    return ray_value_all
 
 
 def render_rays(x0, v, p0, n, c):
@@ -1031,10 +1051,10 @@ def main():
 
     from tqdm import tqdm
     n_frames = 1
-    n_samples = 256
+    n_samples = 16
     gamma = 0.20
     #scene_name = 'bobbing_spheres'#'diffuse_box_with_light'
-    scene_name = 'teapot_scene'
+    scene_name = 'teapot_scene_batched'
 
     #spheres_p0 = scene['spheres']['p0'].copy()
     #verts = scene['triangle_meshes']['vertices'][0].copy()
@@ -1089,6 +1109,7 @@ def main():
                     scene,
                     n_diffuse=3,
                     collect_rays=False,
+                    batch_size=1024*4,
                     rng=rng
                 )
             pixel_intensity = np.linalg.norm(pixel_color, axis=1)
