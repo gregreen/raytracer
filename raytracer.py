@@ -9,6 +9,8 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+from tqdm import tqdm
+
 import os
 
 
@@ -84,6 +86,8 @@ def triangle_normal(p):
     dp = np.diff(p[:,:3], axis=1) # shape = (triangles, edges, dims)
     # Compute normals
     n = np.cross(dp[:,0], dp[:,1], axisa=1, axisb=1) # shape = (triangles, dims)
+    # Normalize normals
+    n /= np.linalg.norm(n, axis=1)[:,None]
     return n
 
 
@@ -494,6 +498,7 @@ def diffuse_reflection_outgoing(vi, n, rng):
     #vo[idx_reflect] -= 2 * n[idx_reflect] * vo_dot_n[idx_reflect,None]
     vi_norm = np.linalg.norm(vi, axis=1)
     cos_phi = np.abs(vo_dot_n / vi_norm)
+    #print(cos_phi)
     return vo, cos_phi
 
 
@@ -615,7 +620,11 @@ def render_rays_recursive(
         ray_props = {k:[] for k in keys}
 
     # Loop over batches of rays
-    for r0 in range(0,n_rays_all,batch_size):
+    ray_iter = range(0,n_rays_all,batch_size)
+    if recursion_depth == 0:
+        ray_iter = tqdm(ray_iter)
+
+    for r0 in ray_iter:
         x0 = x0_all[r0:r0+batch_size]
         v = v_all[r0:r0+batch_size]
 
@@ -856,6 +865,7 @@ def render_rays_recursive(
             vo,cos_phi = diffuse_reflection_outgoing(v_i, n, rng)
             v_child.append(vo)
             child_contrib.append(diffuse*cos_phi[:,None]/n_diffuse)
+            #child_contrib.append(diffuse/n_diffuse)
             child_parent_idx.append(ray_idx)
 
         # Combine all types of child rays into one array
@@ -1049,12 +1059,11 @@ def main():
     if n_dim != 3:
         return 0
 
-    from tqdm import tqdm
     n_frames = 1
     n_samples = 16
     gamma = 0.20
     #scene_name = 'bobbing_spheres'#'diffuse_box_with_light'
-    scene_name = 'teapot_scene_batched'
+    scene_name = 'teapot_marble_scene'
 
     #spheres_p0 = scene['spheres']['p0'].copy()
     #verts = scene['triangle_meshes']['vertices'][0].copy()
@@ -1064,7 +1073,12 @@ def main():
     #    -0.1*np.pi
     #)
 
-    for max_depth in range(2,3):
+    #scene['triangle_meshes']['vertices'] = scene['triangle_meshes']['vertices'][:-1]
+    #scene['triangle_meshes']['faces'] = scene['triangle_meshes']['faces'][:-1]
+    #scene['triangle_meshes']['bounds']['x0'] = scene['triangle_meshes']['bounds']['x0'][:-1]
+    #scene['triangle_meshes']['bounds']['r'] = scene['triangle_meshes']['bounds']['r'][:-1]
+
+    for max_depth in range(5,6):
         print(f'Rendering scene at max depth {max_depth} ...')
         n_pix = np.prod(camera_shape)
         pixel_value_max = None
